@@ -433,7 +433,7 @@ gold_query = (
     # Continuous: process new Silver alerts every 60 seconds.
     # Gold correlation involves a batch JOIN against Bronze,
     # so a slightly longer interval reduces redundant reads.
-    .trigger(processingTime="60 seconds")
+    .trigger(availableNow=True)
 
     # For one-shot backfill, comment the above and uncomment:
     # .trigger(availableNow=True)
@@ -450,13 +450,17 @@ print(f"Gold correlation stream started → {GOLD_TABLE}")
 # ---------------------------------------------------------
 # Uncomment to inspect:
 #
-# display(
-#     spark.sql(f"""
-#         SELECT incident_id, alert_type, application_id,
-#                alert_timestamp, prior_alert_count,
-#                LEFT(incident_context_text, 200) AS context_preview,
-#                summary
-#         FROM {GOLD_TABLE}
-#         ORDER BY alert_timestamp
-#     """)
-# )
+display(
+    spark.sql(f"""
+        SELECT incident_id, alert_type, application_id,
+               alert_timestamp, prior_alert_count,
+               LEFT(incident_context_text, 200) AS context_preview,
+               summary
+        FROM {GOLD_TABLE}
+        ORDER BY alert_timestamp
+    """)
+)
+
+# COMMAND ----------
+
+
