@@ -159,6 +159,17 @@ def correlate_and_enrich(micro_batch_df, batch_id):
       2. Aggregate deployments, errors, metrics, prior alerts
       3. Build context text
       4. Write to Gold
+
+    IMPORTANT — Column Disambiguation:
+      After joining alerts with Bronze and then joining multiple
+      aggregation DataFrames back, Spark can encounter ambiguous
+      'fingerprint' columns (the same column name from multiple
+      sources). Spark Connect is especially strict about this.
+
+      FIX: Each aggregation renames its groupBy key to a unique
+      name (_fp_*), joins on that, then drops it. This ensures
+      only ONE 'fingerprint' column survives from the original
+      alerts_df — no ambiguity.
     """
     if micro_batch_df.count() == 0:
         print(f"Batch {batch_id}: empty — skipping")
@@ -195,10 +206,12 @@ def correlate_and_enrich(micro_batch_df, batch_id):
     # --------------------------------------------------
     # 2b. AGGREGATE DEPLOYMENTS
     # --------------------------------------------------
+    # Rename groupBy key to _fp_dep to avoid ambiguity when
+    # joining back to alerts_df.
     deployments_agg = (
         lookback_join
         .filter(col("bronze.event_type") == "deployment")
-        .groupBy(col("alert.fingerprint"))
+        .groupBy(col("alert.fingerprint").alias("_fp_dep"))
         .agg(
             to_json(
                 collect_list(
@@ -216,8 +229,6 @@ def correlate_and_enrich(micro_batch_df, batch_id):
     # --------------------------------------------------
     # 2c. AGGREGATE ERROR LOGS
     # --------------------------------------------------
-    # Group by error_code within each alert's window,
-    # then pivot into a JSON summary: {"ERROR_CODE": count}
     error_logs = (
         lookback_join
         .filter(
@@ -225,14 +236,17 @@ def correlate_and_enrich(micro_batch_df, batch_id):
             & (col("bronze.log_level") == "ERROR")
             & (col("bronze.error_code").isNotNull())
         )
-        .groupBy(col("alert.fingerprint"), col("bronze.error_code"))
+        .groupBy(
+            col("alert.fingerprint").alias("_fp_err"),
+            col("bronze.error_code")
+        )
         .agg(spark_count("*").alias("err_count"))
     )
 
     # Collapse error counts into a JSON map per fingerprint
     error_summary_agg = (
         error_logs
-        .groupBy("fingerprint")
+        .groupBy("_fp_err")
         .agg(
             to_json(
                 F.map_from_arrays(
@@ -249,7 +263,7 @@ def correlate_and_enrich(micro_batch_df, batch_id):
     metrics_agg = (
         lookback_join
         .filter(col("bronze.event_type") == "metric")
-        .groupBy(col("alert.fingerprint"))
+        .groupBy(col("alert.fingerprint").alias("_fp_met"))
         .agg(
             spark_max(
                 when(col("bronze.metric_name") == "cpu_percent",
@@ -279,7 +293,7 @@ def correlate_and_enrich(micro_batch_df, batch_id):
             (col("bronze.event_type") == "alert")
             & (col("bronze.alert_id") != col("alert.alert_id"))
         )
-        .groupBy(col("alert.fingerprint"))
+        .groupBy(col("alert.fingerprint").alias("_fp_pri"))
         .agg(
             spark_count("*").alias("prior_alert_count")
         )
@@ -288,27 +302,31 @@ def correlate_and_enrich(micro_batch_df, batch_id):
     # --------------------------------------------------
     # 2f. JOIN ALL AGGREGATIONS BACK TO ALERTS
     # --------------------------------------------------
+    # Each aggregation has a uniquely-named join key (_fp_*).
+    # After joining, we drop the _fp_* columns, leaving only
+    # the original alerts_df.fingerprint — zero ambiguity.
+
     enriched = (
         alerts_df
         .join(deployments_agg,
-              alerts_df.fingerprint == deployments_agg.fingerprint,
+              col("alert.fingerprint") == col("_fp_dep"),
               "left")
-        .drop(deployments_agg.fingerprint)
+        .drop("_fp_dep")
 
         .join(error_summary_agg,
-              alerts_df.fingerprint == error_summary_agg.fingerprint,
+              col("alert.fingerprint") == col("_fp_err"),
               "left")
-        .drop(error_summary_agg.fingerprint)
+        .drop("_fp_err")
 
         .join(metrics_agg,
-              alerts_df.fingerprint == metrics_agg.fingerprint,
+              col("alert.fingerprint") == col("_fp_met"),
               "left")
-        .drop(metrics_agg.fingerprint)
+        .drop("_fp_met")
 
         .join(prior_alerts_agg,
-              alerts_df.fingerprint == prior_alerts_agg.fingerprint,
+              col("alert.fingerprint") == col("_fp_pri"),
               "left")
-        .drop(prior_alerts_agg.fingerprint)
+        .drop("_fp_pri")
     )
 
     # --------------------------------------------------
@@ -348,15 +366,18 @@ def correlate_and_enrich(micro_batch_df, batch_id):
     # --------------------------------------------------
     # 2i. BUILD FINAL GOLD SCHEMA
     # --------------------------------------------------
+    # Use explicit alias("alert") references for columns that
+    # could have survived from the lookback_join (application_id,
+    # host_id, alert_type, etc.) to guarantee no ambiguity.
     gold_df = enriched.select(
         F.expr("uuid()").alias("incident_id"),
-        col("alert_id"),
-        col("fingerprint"),
-        col("application_id"),
-        col("host_id"),
-        col("alert_type"),
-        col("severity"),
-        col("first_seen_timestamp").alias("alert_timestamp"),
+        col("alert.alert_id").alias("alert_id"),
+        col("alert.fingerprint").alias("fingerprint"),
+        col("alert.application_id").alias("application_id"),
+        col("alert.host_id").alias("host_id"),
+        col("alert.alert_type").alias("alert_type"),
+        col("alert.severity").alias("severity"),
+        col("alert.first_seen_timestamp").alias("alert_timestamp"),
         col("correlated_deployments"),
         col("error_summary"),
         col("metric_summary"),
