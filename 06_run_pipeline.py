@@ -88,9 +88,9 @@ print("PIPELINE VERIFICATION")
 print("=" * 60)
 
 for table_name, label in [
-    ("alert_ops.pipeline.bronze_events", "Bronze (raw events)"),
-    ("alert_ops.pipeline.silver_alerts", "Silver (deduped alerts)"),
-    ("alert_ops.pipeline.gold_incidents", "Gold (incidents)"),
+    ("akash_s_demo.ams.bronze_events", "Bronze (raw events)"),
+    ("akash_s_demo.ams.silver_alerts", "Silver (deduped alerts)"),
+    ("akash_s_demo.ams.gold_incidents", "Gold (incidents)"),
 ]:
     try:
         count = spark.sql(
@@ -109,7 +109,7 @@ print("\n--- Gold Incidents ---")
 #                LEFT(incident_context_text, 300) AS context_preview,
 #                LEFT(summary, 200) AS summary_preview,
 #                root_cause, confidence_score
-#         FROM alert_ops.pipeline.gold_incidents
+#         FROM akash_s_demo.ams.gold_incidents
 #         ORDER BY alert_timestamp
 #     """)
 # )

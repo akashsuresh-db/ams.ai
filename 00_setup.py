@@ -29,10 +29,10 @@
 # Uncomment if you have CREATE CATALOG privileges.
 # Otherwise ask your workspace admin to create these.
 
-spark.sql("CREATE CATALOG IF NOT EXISTS alert_ops")
-spark.sql("CREATE SCHEMA IF NOT EXISTS alert_ops.pipeline")
-spark.sql("USE CATALOG alert_ops")
-spark.sql("USE SCHEMA pipeline")
+spark.sql("CREATE CATALOG IF NOT EXISTS akash_s_demo")
+spark.sql("CREATE SCHEMA IF NOT EXISTS akash_s_demo.ams")
+spark.sql("USE CATALOG akash_s_demo")
+spark.sql("USE SCHEMA ams")
 
 # COMMAND ----------
 

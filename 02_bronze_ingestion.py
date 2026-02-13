@@ -27,7 +27,7 @@
 
 # Inline config for standalone reference
 RAW_EVENTS_PATH  = "/mnt/alert_pipeline/raw_events"
-BRONZE_TABLE      = "alert_ops.pipeline.bronze_events"
+BRONZE_TABLE      = "akash_s_demo.ams.bronze_events"
 BRONZE_CHECKPOINT = "/mnt/alert_pipeline/checkpoints/bronze"
 
 # COMMAND ----------

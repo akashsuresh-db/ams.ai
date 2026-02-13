@@ -44,8 +44,8 @@
 # %run ./config
 
 # Inline config for standalone reference
-BRONZE_TABLE      = "alert_ops.pipeline.bronze_events"
-SILVER_TABLE      = "alert_ops.pipeline.silver_alerts"
+BRONZE_TABLE      = "akash_s_demo.ams.bronze_events"
+SILVER_TABLE      = "akash_s_demo.ams.silver_alerts"
 SILVER_CHECKPOINT = "/mnt/alert_pipeline/checkpoints/silver"
 DEDUP_WINDOW_MINUTES = 5
 WATERMARK_DELAY      = "10 minutes"

@@ -29,8 +29,8 @@ SILVER_CHECKPOINT = f"{BASE_PATH}/checkpoints/silver"
 # ---------------------------------------------------------
 # 2. CATALOG / SCHEMA NAMES (Unity Catalog compatible)
 # ---------------------------------------------------------
-CATALOG  = "alert_ops"
-SCHEMA   = "pipeline"
+CATALOG  = "akash_s_demo"
+SCHEMA   = "ams"
 BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_events"
 SILVER_TABLE = f"{CATALOG}.{SCHEMA}.silver_alerts"
 GOLD_TABLE   = f"{CATALOG}.{SCHEMA}.gold_incidents"

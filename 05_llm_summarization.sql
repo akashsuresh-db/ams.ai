@@ -65,7 +65,7 @@
 -- WHERE summary IS NULL ensures idempotency: rows that
 -- already have a summary are skipped on re-runs.
 
-UPDATE alert_ops.pipeline.gold_incidents
+UPDATE akash_s_demo.ams.gold_incidents
 SET summary = ai_summarize(
     CONCAT(
         'Summarize this incident in 5 lines. ',
@@ -93,7 +93,7 @@ WHERE summary IS NULL;
 -- if the LLM output is unstructured.  The summary field
 -- always has the complete response as a fallback.
 
-UPDATE alert_ops.pipeline.gold_incidents
+UPDATE akash_s_demo.ams.gold_incidents
 SET
     root_cause = COALESCE(
         regexp_extract(summary, 'Root Cause:\\s*(.+?)(?:\\n|$)', 1),
@@ -122,5 +122,5 @@ SELECT
     root_cause,
     confidence_score,
     prior_alert_count
-FROM alert_ops.pipeline.gold_incidents
+FROM akash_s_demo.ams.gold_incidents
 ORDER BY alert_timestamp DESC;

@@ -51,7 +51,7 @@ Import all `.py` and `.sql` files into a Databricks workspace folder (e.g., `/Re
 Run: 00_setup.py
 ```
 
-This creates the `alert_ops.pipeline` schema and all three Delta tables.
+This creates the `akash_s_demo.ams` schema and all three Delta tables.
 
 ### 3. Generate Synthetic Data
 

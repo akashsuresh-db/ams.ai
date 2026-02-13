@@ -55,9 +55,9 @@
 # %run ./config
 
 # Inline config for standalone reference
-BRONZE_TABLE = "alert_ops.pipeline.bronze_events"
-SILVER_TABLE = "alert_ops.pipeline.silver_alerts"
-GOLD_TABLE   = "alert_ops.pipeline.gold_incidents"
+BRONZE_TABLE = "akash_s_demo.ams.bronze_events"
+SILVER_TABLE = "akash_s_demo.ams.silver_alerts"
+GOLD_TABLE   = "akash_s_demo.ams.gold_incidents"
 GOLD_CHECKPOINT = "/mnt/alert_pipeline/checkpoints/gold"
 CORRELATION_LOOKBACK_MINUTES = 60
 
