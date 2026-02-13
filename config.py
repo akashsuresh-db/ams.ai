@@ -32,9 +32,10 @@ SILVER_CHECKPOINT = f"{BASE_PATH}/checkpoints/silver"
 # ---------------------------------------------------------
 CATALOG  = "akash_s_demo"
 SCHEMA   = "ams"
-BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_events"
-SILVER_TABLE = f"{CATALOG}.{SCHEMA}.silver_alerts"
-GOLD_TABLE   = f"{CATALOG}.{SCHEMA}.gold_incidents"
+BRONZE_TABLE   = f"{CATALOG}.{SCHEMA}.bronze_events"
+SILVER_TABLE   = f"{CATALOG}.{SCHEMA}.silver_alerts"
+GOLD_TABLE     = f"{CATALOG}.{SCHEMA}.gold_incidents"
+PLATINUM_TABLE = f"{CATALOG}.{SCHEMA}.platinum_incidents"
 
 # ---------------------------------------------------------
 # 3. PIPELINE PARAMETERS

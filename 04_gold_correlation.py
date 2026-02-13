@@ -384,11 +384,6 @@ def correlate_and_enrich(micro_batch_df, batch_id):
         F.coalesce(col("prior_alert_count"), lit(0))
          .alias("prior_alert_count"),
         col("incident_context_text"),
-        lit(None).cast("string").alias("summary"),
-        lit(None).cast("string").alias("patterns"),
-        lit(None).cast("string").alias("root_cause"),
-        lit(None).cast("double").alias("confidence_score"),
-        lit(None).cast("string").alias("recommended_action"),
         current_timestamp().alias("_created_at"),
     )
 

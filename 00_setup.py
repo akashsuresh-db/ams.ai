@@ -177,18 +177,13 @@ CREATE TABLE IF NOT EXISTS gold_incidents (
     metric_summary         STRING              COMMENT 'JSON: {cpu_max, cpu_avg, mem_max, err_rate_max}',
     prior_alert_count      INT                 COMMENT 'Count of other alerts in 60-min window',
 
-    -- Context & LLM (populated by ai_query batch job)
+    -- Context bundle for downstream LLM analysis
     incident_context_text  STRING              COMMENT 'Structured text bundle for LLM prompt',
-    summary                STRING              COMMENT 'LLM-generated incident summary',
-    patterns               STRING              COMMENT 'JSON array of detected patterns',
-    root_cause             STRING              COMMENT 'Most likely root cause from LLM',
-    confidence_score       DOUBLE              COMMENT 'LLM confidence in root cause 0–1',
-    recommended_action     STRING              COMMENT 'Suggested next step for on-call engineer',
 
     _created_at            TIMESTAMP           COMMENT 'Gold row creation time'
 )
 USING DELTA
-COMMENT 'Enriched incidents with correlation context and LLM summary'
+COMMENT 'Correlated incidents with context — deterministic, no LLM'
 TBLPROPERTIES (
     'delta.autoOptimize.optimizeWrite' = 'true',
     'delta.autoOptimize.autoCompact'   = 'true'
@@ -200,10 +195,32 @@ print("✓ gold_incidents table created")
 # COMMAND ----------
 
 # ---------------------------------------------------------
+# 5. PLATINUM TABLE — LLM-enriched incidents
+# ---------------------------------------------------------
+# Created by 05_llm_analysis.py via CREATE OR REPLACE TABLE
+# AS SELECT.  We only declare it here for documentation;
+# the actual table is built at runtime by the LLM batch job.
+#
+# Platinum = Gold + ai_query() structured output:
+#   summary, patterns, root_cause, confidence_score,
+#   recommended_action, llm_raw_response
+
+print("ℹ platinum_incidents — created at runtime by 05_llm_analysis.py")
+
+# COMMAND ----------
+
+# ---------------------------------------------------------
 # 5. VERIFY
 # ---------------------------------------------------------
 for tbl in ["bronze_events", "silver_alerts", "gold_incidents"]:
     count = spark.sql(f"SELECT COUNT(*) AS cnt FROM {tbl}").collect()[0]["cnt"]
     print(f"  {tbl}: {count} rows")
+
+# platinum_incidents is created at runtime by 05_llm_analysis.py
+try:
+    count = spark.sql("SELECT COUNT(*) AS cnt FROM platinum_incidents").collect()[0]["cnt"]
+    print(f"  platinum_incidents: {count} rows")
+except Exception:
+    print(f"  platinum_incidents: not yet created (run 05_llm_analysis.py)")
 
 print("\n✓ Setup complete — all tables ready")

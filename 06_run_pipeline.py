@@ -118,20 +118,18 @@ for table_name, label in [
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 8: LLM ANALYSIS (Batch SQL using ai_query)
+# STEP 8: PLATINUM — LLM ANALYSIS (Batch using ai_query)
 # ---------------------------------------------------------
 # Run AFTER streaming data has landed in Gold.
+# Creates platinum_incidents via CREATE OR REPLACE TABLE AS SELECT.
 # This is a batch operation — not part of the streaming DAG.
-# Uses ai_query() with structured JSON output for reliable parsing.
-#
-# Run 05_llm_summarization.sql or execute inline:
 
-# %run ./05_llm_summarization
+# %run ./05_llm_analysis
 
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 9: INSPECT RESULTS
+# STEP 9: INSPECT PLATINUM RESULTS
 # ---------------------------------------------------------
 
 # display(
@@ -141,7 +139,7 @@ for table_name, label in [
 #                summary, patterns,
 #                root_cause, confidence_score,
 #                recommended_action
-#         FROM akash_s_demo.ams.gold_incidents
+#         FROM akash_s_demo.ams.platinum_incidents
 #         ORDER BY alert_timestamp
 #     """)
 # )

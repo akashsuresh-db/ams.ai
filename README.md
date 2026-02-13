@@ -1,6 +1,6 @@
 # Unified Alert Pipeline — Databricks MVP
 
-**Ingestion → Deduplication → Correlation → Context Building → LLM Summarization**
+**Ingestion → Deduplication → Correlation → Context Building → LLM Analysis (Platinum)**
 
 A production-style streaming pipeline built on Databricks that ingests operational alerts, deduplicates them, correlates with surrounding telemetry, builds structured context bundles, and generates LLM-powered incident summaries.
 
@@ -10,12 +10,12 @@ A production-style streaming pipeline built on Databricks that ingests operation
 
 ```
 ┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  JSONL       │    │   BRONZE     │    │   SILVER     │    │    GOLD      │    │  LLM BATCH   │
-│  Landing     │───▶│  Raw Events  │───▶│  Deduped     │───▶│  Correlated  │───▶│  Summarized  │
+│  JSONL       │    │   BRONZE     │    │   SILVER     │    │    GOLD      │    │  PLATINUM    │
+│  Landing     │───▶│  Raw Events  │───▶│  Deduped     │───▶│  Correlated  │───▶│  LLM-Enriched│
 │  Zone        │    │  (Delta)     │    │  Alerts      │    │  Incidents   │    │  Incidents   │
-│              │    │              │    │  (Delta)     │    │  (Delta)     │    │              │
+│              │    │              │    │  (Delta)     │    │  (Delta)     │    │  (Delta)     │
 │ Auto Loader  │    │ Append-only  │    │ Stateful     │    │ foreachBatch │    │  ai_query()  │
-│ cloudFiles   │    │ No transform │    │ Aggregation  │    │ 60-min join  │    │ Batch UPDATE │
+│ cloudFiles   │    │ No transform │    │ Aggregation  │    │ 60-min join  │    │ CTAS batch   │
 └─────────────┘    └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
      Stream              Stream              Stream              Stream              Batch
 ```
@@ -32,7 +32,7 @@ databricks-alert-pipeline/
 ├── 02_bronze_ingestion.py     # Auto Loader → Bronze Delta table
 ├── 03_silver_dedup.py         # Fingerprint-based alert deduplication
 ├── 04_gold_correlation.py     # 60-min lookback correlation + context builder
-├── 05_llm_summarization.sql   # Batch ai_query() with structured JSON output
+├── 05_llm_analysis.py         # Platinum layer — ai_query() CTAS with structured JSON
 ├── 06_run_pipeline.py         # End-to-end orchestrator notebook
 └── README.md                  # This file
 ```
@@ -148,7 +148,8 @@ The medallion architecture is not just organizational — it provides critical o
 |-------|---------|-------------|
 | **Bronze** | Raw, immutable event log | **Reprocessable**: If Silver or Gold logic has a bug, we can recompute from Bronze without re-ingesting |
 | **Silver** | Cleaned, deduplicated alerts | **Noise-free**: Downstream consumers see only meaningful signals, not repeated firings |
-| **Gold** | Business-level incidents | **Enriched**: Each incident has full context, ready for dashboards and LLM summarization |
+| **Gold** | Business-level incidents | **Enriched**: Each incident has full deterministic context, ready for dashboards and Platinum LLM layer |
+| **Platinum** | LLM-analyzed incidents | **AI-Enriched**: Gold + summary, patterns, root cause, confidence, recommended action via ai_query() |
 
 Without this separation:
 - A bug in dedup logic could corrupt raw data (no Bronze isolation)
@@ -192,10 +193,10 @@ For production, convert the orchestrator to a **Databricks Workflow**:
 Task 1: 02_bronze_ingestion.py  (continuous streaming)
 Task 2: 03_silver_dedup.py      (continuous streaming)
 Task 3: 04_gold_correlation.py  (continuous streaming)
-Task 4: 05_llm_summarization.sql (scheduled every 5 min)
+Task 4: 05_llm_analysis.py      (scheduled every 5 min — CTAS Platinum)
 ```
 
-Tasks 1–3 run as long-running streaming jobs. Task 4 runs on a schedule to backfill summaries.
+Tasks 1–3 run as long-running streaming jobs. Task 4 runs on a schedule and fully rebuilds the Platinum table via `CREATE OR REPLACE TABLE ... AS SELECT`.
 
 ---
 
