@@ -14,7 +14,7 @@ A production-style streaming pipeline built on Databricks that ingests operation
 │  Landing     │───▶│  Raw Events  │───▶│  Deduped     │───▶│  Correlated  │───▶│  Summarized  │
 │  Zone        │    │  (Delta)     │    │  Alerts      │    │  Incidents   │    │  Incidents   │
 │              │    │              │    │  (Delta)     │    │  (Delta)     │    │              │
-│ Auto Loader  │    │ Append-only  │    │ Stateful     │    │ foreachBatch │    │ ai_summarize │
+│ Auto Loader  │    │ Append-only  │    │ Stateful     │    │ foreachBatch │    │  ai_query()  │
 │ cloudFiles   │    │ No transform │    │ Aggregation  │    │ 60-min join  │    │ Batch UPDATE │
 └─────────────┘    └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
      Stream              Stream              Stream              Stream              Batch
@@ -32,7 +32,7 @@ databricks-alert-pipeline/
 ├── 02_bronze_ingestion.py     # Auto Loader → Bronze Delta table
 ├── 03_silver_dedup.py         # Fingerprint-based alert deduplication
 ├── 04_gold_correlation.py     # 60-min lookback correlation + context builder
-├── 05_llm_summarization.sql   # Batch ai_summarize() + root cause extraction
+├── 05_llm_summarization.sql   # Batch ai_query() with structured JSON output
 ├── 06_run_pipeline.py         # End-to-end orchestrator notebook
 └── README.md                  # This file
 ```
@@ -131,12 +131,14 @@ The LLM's role is to **interpret** the pre-built context, not to **gather** it.
 
 ### Why LLM Runs as Micro-Batch (Not Inside Streaming DAG)
 
-The `ai_summarize()` function is deliberately separated from the streaming pipeline and runs as a batch SQL UPDATE:
+`ai_query()` is used instead of `ai_summarize()` and is deliberately separated from the streaming pipeline, running as a batch SQL UPDATE:
 
-1. **Cost control**: In streaming, every micro-batch would fire LLM calls — potentially hundreds per hour during an incident storm. Batch mode processes only `WHERE summary IS NULL` rows, naturally deduplicating work.
-2. **Latency isolation**: LLM calls take 2–10 seconds. Inside the streaming DAG, they would block correlation processing, increasing end-to-end latency for dashboards and PagerDuty integrations.
-3. **Retry safety**: LLM calls can fail (rate limits, model timeouts). In streaming, a failed micro-batch retries ALL records. In batch mode, the idempotent `WHERE summary IS NULL` clause means only unfilled rows are retried.
-4. **Deterministic/stochastic separation**: Bronze → Silver → Gold is deterministic (same input → same output). LLM summarization is stochastic (different runs may produce different text). Keeping them in separate execution contexts means the deterministic pipeline can be independently validated and tested.
+- **Structured output**: `ai_query()` supports `responseFormat` with JSON schema, so the LLM returns typed fields (summary, patterns, root_cause, confidence_score, recommended_action) directly — no regex parsing needed.
+- **Model choice**: `ai_query()` lets you pick any Model Serving endpoint (e.g., `databricks-meta-llama-3-3-70b-instruct`).
+- **Cost control**: In streaming, every micro-batch would fire LLM calls — potentially hundreds per hour during an incident storm. Batch mode processes only `WHERE summary IS NULL` rows, naturally deduplicating work.
+- **Latency isolation**: LLM calls take 2–10 seconds. Inside the streaming DAG, they would block correlation processing, increasing end-to-end latency for dashboards and PagerDuty integrations.
+- **Retry safety**: LLM calls can fail (rate limits, model timeouts). In streaming, a failed micro-batch retries ALL records. In batch mode, the idempotent `WHERE summary IS NULL` clause means only unfilled rows are retried. Using `failOnError => false` ensures one bad row doesn't kill the entire batch.
+- **Deterministic/stochastic separation**: Bronze → Silver → Gold is deterministic (same input → same output). LLM analysis is stochastic (different runs may produce different text). Keeping them in separate execution contexts means the deterministic pipeline can be independently validated and tested.
 
 ### Why Bronze / Silver / Gold Separation Matters
 
@@ -153,11 +155,11 @@ Without this separation:
 - Alert storms would flood LLM summarization (no Silver filtering)
 - Re-processing would require re-ingesting from source systems (no immutable Bronze)
 
-### Why `ai_summarize()` Should Not Be Inside the Streaming DAG
+### Why `ai_query()` Should Not Be Inside the Streaming DAG
 
 Beyond the cost and latency reasons above, there is an architectural principle: **streaming DAGs should be side-effect-free and deterministic**.
 
-`ai_summarize()` has external side effects (API call to a model endpoint) and is non-deterministic (same prompt may produce different responses). Placing it inside a streaming DAG means:
+`ai_query()` has external side effects (API call to a model endpoint) and is non-deterministic (same prompt may produce different responses). Placing it inside a streaming DAG means:
 
 - **Checkpoint recovery** might re-invoke the LLM for already-summarized incidents
 - **Micro-batch retries** would generate different summaries for the same incident
@@ -206,4 +208,4 @@ Tasks 1–3 run as long-running streaming jobs. Task 4 runs on a schedule to bac
 | Processing | PySpark Structured Streaming | Unified batch/stream, stateful aggregation, watermarking |
 | Deduplication | Stateful window aggregation | Deterministic, auditable, sub-second per micro-batch |
 | Correlation | foreachBatch + batch join | Flexible lookback window, full SQL expressiveness |
-| Summarization | Databricks SQL ai_summarize() | Managed LLM endpoint, SQL-native, no infra to manage |
+| LLM Analysis | Databricks SQL ai_query() | Structured JSON output, model choice, failOnError support |

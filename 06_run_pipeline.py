@@ -118,24 +118,15 @@ for table_name, label in [
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 8: LLM SUMMARIZATION (Batch SQL)
+# STEP 8: LLM ANALYSIS (Batch SQL using ai_query)
 # ---------------------------------------------------------
 # Run AFTER streaming data has landed in Gold.
 # This is a batch operation — not part of the streaming DAG.
+# Uses ai_query() with structured JSON output for reliable parsing.
+#
+# Run 05_llm_summarization.sql or execute inline:
 
-# spark.sql("""
-#     UPDATE akash_s_demo.ams.gold_incidents
-#     SET summary = ai_summarize(
-#         CONCAT(
-#             'Summarize this incident in 5 lines. ',
-#             'Then provide on separate labeled lines: ',
-#             '1. Root Cause: <most likely root cause>. ',
-#             '2. Confidence: <score between 0 and 1>. ',
-#             incident_context_text
-#         )
-#     )
-#     WHERE summary IS NULL
-# """)
+# %run ./05_llm_summarization
 
 # COMMAND ----------
 
@@ -147,9 +138,9 @@ for table_name, label in [
 #     spark.sql("""
 #         SELECT incident_id, alert_type, application_id,
 #                alert_timestamp, prior_alert_count,
-#                LEFT(incident_context_text, 300) AS context_preview,
-#                LEFT(summary, 200) AS summary_preview,
-#                root_cause, confidence_score
+#                summary, patterns,
+#                root_cause, confidence_score,
+#                recommended_action
 #         FROM akash_s_demo.ams.gold_incidents
 #         ORDER BY alert_timestamp
 #     """)

@@ -1,20 +1,38 @@
 -- =========================================================
--- 05_llm_summarization.sql — LLM Summarization (Batch Layer)
+-- 05_llm_summarization.sql — LLM Analysis (Batch Layer)
 -- =========================================================
 --
 -- PURPOSE:
---   Uses Databricks SQL ai_summarize() to generate human-
---   readable incident summaries, root causes, and confidence
---   scores for Gold incidents that don't yet have a summary.
+--   Uses Databricks SQL ai_query() to analyze Gold incidents
+--   and produce structured output: a summary, detected patterns,
+--   probable root cause, and confidence score.
+--
+-- FUNCTION USED:
+--   ai_query(endpoint, prompt, responseFormat => ...)
+--   Reference: https://learn.microsoft.com/en-us/azure/databricks/sql/language-manual/functions/ai_query
+--
+--   ai_query() calls a foundation model endpoint and returns
+--   structured JSON when responseFormat is specified. This lets
+--   us parse summary, patterns, root_cause, and confidence_score
+--   directly into typed columns — no regex parsing needed.
 --
 -- DESIGN DECISIONS:
 --
---   WHY ai_summarize() RUNS AS A BATCH JOB, NOT IN STREAMING:
+--   WHY ai_query() INSTEAD OF ai_summarize():
+--     - ai_query() supports responseFormat for structured JSON output,
+--       eliminating brittle regex parsing of free-text responses.
+--     - ai_query() lets us choose the model endpoint explicitly.
+--     - ai_query() supports modelParameters (temperature, max_tokens)
+--       for reproducibility and cost control.
+--     - We can request specific fields (patterns, root_cause, confidence)
+--       that ai_summarize() cannot produce in a structured way.
 --
---     1. COST CONTROL: Each ai_summarize() call costs tokens.
+--   WHY ai_query() RUNS AS A BATCH JOB, NOT IN STREAMING:
+--
+--     1. COST CONTROL: Each ai_query() call costs tokens.
 --        In a streaming DAG, every micro-batch would fire LLM
 --        calls — potentially thousands per hour.  Batch mode
---        lets us process only unsummarized rows on a schedule
+--        lets us process only un-analyzed rows on a schedule
 --        (e.g., every 5 minutes via a Databricks Job).
 --
 --     2. LATENCY ISOLATION: LLM round-trips take 2–10 seconds.
@@ -30,7 +48,7 @@
 --
 --     4. DETERMINISTIC vs. STOCHASTIC SEPARATION: The Bronze →
 --        Silver → Gold pipeline is deterministic: same inputs
---        always produce the same outputs.  LLM summarization is
+--        always produce the same outputs.  LLM analysis is
 --        inherently stochastic (different runs may produce
 --        different summaries).  Keeping them separate means the
 --        deterministic pipeline can be validated and tested
@@ -39,8 +57,8 @@
 --   WHY THE CONTEXT BUNDLE IS PRE-BUILT:
 --     The incident_context_text was assembled by the Gold
 --     correlation engine using Spark (deterministic, fast).
---     We pass it directly to ai_summarize() rather than
---     having the LLM re-query raw data.  This ensures:
+--     We pass it directly to ai_query() rather than having
+--     the LLM re-query raw data.  This ensures:
 --       - The LLM sees exactly what the engineer sees
 --       - No risk of the LLM hallucinating data it wasn't given
 --       - The prompt is concise and token-efficient
@@ -51,60 +69,122 @@
 --     - Or after the Gold streaming query completes a batch
 -- =========================================================
 
+
 -- ---------------------------------------------------------
--- STEP 1: SUMMARIZE UNSUMMARIZED INCIDENTS
+-- STEP 1: ANALYZE INCIDENTS WITH STRUCTURED JSON OUTPUT
 -- ---------------------------------------------------------
--- ai_summarize() is a Databricks built-in SQL function that
--- calls the workspace's configured foundation model.
+-- ai_query() with responseFormat => json_schema forces the
+-- LLM to return a JSON object matching our exact schema.
+-- This gives us typed fields we can parse directly —
+-- no regex, no string splitting, no brittle post-processing.
 --
--- The prompt instructs the model to:
---   1. Summarize in 5 lines
---   2. Identify the most likely root cause
---   3. Provide a confidence score (0–1)
+-- We use failOnError => false so that if one row's LLM call
+-- fails (rate limit, timeout), it doesn't kill the entire
+-- UPDATE. Failed rows keep summary = NULL and get retried
+-- on the next scheduled run.
 --
--- WHERE summary IS NULL ensures idempotency: rows that
--- already have a summary are skipped on re-runs.
+-- modelParameters:
+--   temperature = 0.1  → near-deterministic output
+--   max_tokens  = 1024 → enough for structured response
+--
+-- NOTE: Replace 'databricks-meta-llama-3-3-70b-instruct'
+-- with your workspace's available model endpoint. Check
+-- available endpoints in your Model Serving UI.
 
 UPDATE akash_s_demo.ams.gold_incidents
-SET summary = ai_summarize(
+SET summary = ai_query(
+    'databricks-meta-llama-3-3-70b-instruct',
     CONCAT(
-        'Summarize this incident in 5 lines. ',
-        'Then provide on separate labeled lines: ',
-        '1. Root Cause: <most likely root cause>. ',
-        '2. Confidence: <score between 0 and 1>. ',
+        'You are an expert SRE analyzing production incidents. ',
+        'Analyze the following incident context and provide a structured assessment.\n\n',
+        'Instructions:\n',
+        '- summary: A concise 3-5 line summary of what happened.\n',
+        '- patterns: List the observable patterns (e.g., "CPU spike after deployment", ',
+        '  "memory leak without deployment", "cascading timeouts"). Be specific.\n',
+        '- root_cause: The single most likely root cause based on the evidence.\n',
+        '- confidence_score: Your confidence in the root cause (0.0 to 1.0).\n',
+        '- recommended_action: One concrete next step for the on-call engineer.\n\n',
+        'Incident Context:\n',
         incident_context_text
-    )
+    ),
+    modelParameters => named_struct(
+        'temperature', 0.1,
+        'max_tokens', 1024
+    ),
+    responseFormat => '{
+        "type": "json_schema",
+        "json_schema": {
+            "name": "incident_analysis",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "3-5 line incident summary"
+                    },
+                    "patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of detected patterns"
+                    },
+                    "root_cause": {
+                        "type": "string",
+                        "description": "Most likely root cause"
+                    },
+                    "confidence_score": {
+                        "type": "number",
+                        "description": "Confidence in root cause (0.0 to 1.0)"
+                    },
+                    "recommended_action": {
+                        "type": "string",
+                        "description": "Next step for on-call engineer"
+                    }
+                },
+                "required": ["summary", "patterns", "root_cause", "confidence_score", "recommended_action"]
+            },
+            "strict": true
+        }
+    }',
+    failOnError => false
 )
 WHERE summary IS NULL;
 
 
 -- ---------------------------------------------------------
--- STEP 2: PARSE ROOT CAUSE FROM SUMMARY
+-- STEP 2: PARSE STRUCTURED JSON INTO TYPED COLUMNS
 -- ---------------------------------------------------------
--- The LLM response is expected to contain lines like:
---   Root Cause: <text>
---   Confidence: <number>
+-- Since ai_query() with responseFormat returns a JSON string
+-- matching our schema, we use JSON path extraction (`:` operator
+-- or get_json_object) to populate the individual columns.
 --
--- We use regexp_extract to pull these into separate columns.
--- If parsing fails (LLM didn't follow the format), the
--- columns remain NULL and the full summary is still available.
---
--- This is intentionally lenient: we don't fail the pipeline
--- if the LLM output is unstructured.  The summary field
--- always has the complete response as a fallback.
+-- This is much more reliable than regex on free text:
+--   - JSON schema is enforced by the LLM endpoint
+--   - Parsing is deterministic (same JSON → same fields)
+--   - If the JSON is malformed, the columns stay NULL
+--     and the raw summary is preserved as fallback
 
 UPDATE akash_s_demo.ams.gold_incidents
 SET
     root_cause = COALESCE(
-        regexp_extract(summary, 'Root Cause:\\s*(.+?)(?:\\n|$)', 1),
+        get_json_object(summary, '$.root_cause'),
         root_cause
     ),
     confidence_score = COALESCE(
-        CAST(
-            regexp_extract(summary, 'Confidence:\\s*([0-9]*\\.?[0-9]+)', 1)
-            AS DOUBLE
-        ),
+        CAST(get_json_object(summary, '$.confidence_score') AS DOUBLE),
         confidence_score
+    ),
+    patterns = COALESCE(
+        get_json_object(summary, '$.patterns'),
+        patterns
+    ),
+    recommended_action = COALESCE(
+        get_json_object(summary, '$.recommended_action'),
+        recommended_action
+    ),
+    -- Replace the raw JSON with just the human-readable summary
+    summary = COALESCE(
+        get_json_object(summary, '$.summary'),
+        summary
     )
 WHERE summary IS NOT NULL
   AND root_cause IS NULL;
@@ -118,9 +198,11 @@ SELECT
     alert_type,
     application_id,
     alert_timestamp,
-    LEFT(summary, 200)    AS summary_preview,
+    summary,
+    patterns,
     root_cause,
     confidence_score,
+    recommended_action,
     prior_alert_count
 FROM akash_s_demo.ams.gold_incidents
 ORDER BY alert_timestamp DESC;

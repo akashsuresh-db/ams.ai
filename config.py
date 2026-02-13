@@ -65,11 +65,12 @@ GENERATOR_OUTPUT_FILE = f"{RAW_EVENTS_PATH}/events.jsonl"
 # ---------------------------------------------------------
 # 5. LLM CONFIGURATION
 # ---------------------------------------------------------
-# ai_summarize() prompt prefix — keep deterministic correlation
-# separate from stochastic LLM summarization.
-LLM_PROMPT_PREFIX = (
-    "Summarize this incident in 5 lines. "
-    "Then provide: "
-    "1. Most likely root cause. "
-    "2. Confidence score between 0 and 1. "
-)
+# ai_query() is used instead of ai_summarize() for structured
+# JSON output.  The model endpoint must be available in your
+# workspace's Model Serving.  Check the Serving UI for endpoints.
+#
+# Keep deterministic correlation separate from stochastic LLM.
+
+LLM_MODEL_ENDPOINT = "databricks-meta-llama-3-3-70b-instruct"
+LLM_TEMPERATURE = 0.1       # Near-deterministic for consistency
+LLM_MAX_TOKENS = 1024       # Enough for structured JSON response
