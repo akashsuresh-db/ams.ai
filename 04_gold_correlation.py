@@ -58,7 +58,7 @@
 BRONZE_TABLE = "akash_s_demo.ams.bronze_events"
 SILVER_TABLE = "akash_s_demo.ams.silver_alerts"
 GOLD_TABLE   = "akash_s_demo.ams.gold_incidents"
-GOLD_CHECKPOINT = "/mnt/alert_pipeline/checkpoints/gold"
+GOLD_CHECKPOINT = "/Volumes/akash_s_demo/ams/alert_pipeline/checkpoints/gold"
 CORRELATION_LOOKBACK_MINUTES = 60
 
 # COMMAND ----------

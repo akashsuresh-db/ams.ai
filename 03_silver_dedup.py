@@ -46,7 +46,7 @@
 # Inline config for standalone reference
 BRONZE_TABLE      = "akash_s_demo.ams.bronze_events"
 SILVER_TABLE      = "akash_s_demo.ams.silver_alerts"
-SILVER_CHECKPOINT = "/mnt/alert_pipeline/checkpoints/silver"
+SILVER_CHECKPOINT = "/Volumes/akash_s_demo/ams/alert_pipeline/checkpoints/silver"
 DEDUP_WINDOW_MINUTES = 5
 WATERMARK_DELAY      = "10 minutes"
 

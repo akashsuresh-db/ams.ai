@@ -9,10 +9,11 @@
 # ---------------------------------------------------------
 # 1. STORAGE PATHS
 # ---------------------------------------------------------
-# Root path for the pipeline's Delta tables and checkpoints.
-# Adjust BASE_PATH to match your Databricks workspace mount
-# (e.g., /mnt/datalake, dbfs:/..., or Unity Catalog volume).
-BASE_PATH = "/mnt/alert_pipeline"
+# Root path for the pipeline's file storage.
+# Uses a Unity Catalog Volume for governed, cataloged access
+# to unstructured/semi-structured files.
+# Format: /Volumes/<catalog>/<schema>/<volume_name>
+BASE_PATH = "/Volumes/akash_s_demo/ams/alert_pipeline"
 
 # Where the synthetic data generator writes JSONL files
 RAW_EVENTS_PATH = f"{BASE_PATH}/raw_events"

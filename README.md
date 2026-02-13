@@ -174,7 +174,7 @@ All configuration lives in `config.py`:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `BASE_PATH` | `/mnt/alert_pipeline` | Root storage path |
+| `BASE_PATH` | `/Volumes/akash_s_demo/ams/alert_pipeline` | Root storage path (UC Volume) |
 | `DEDUP_WINDOW_MINUTES` | 5 | Alert suppression window |
 | `CORRELATION_LOOKBACK_MINUTES` | 60 | Correlation context window |
 | `WATERMARK_DELAY` | 10 minutes | Late-arrival tolerance |

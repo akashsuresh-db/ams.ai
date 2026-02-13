@@ -37,7 +37,34 @@ spark.sql("USE SCHEMA ams")
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# 2. BRONZE TABLE — Raw event ingestion
+# 2. CREATE VOLUME FOR FILE STORAGE
+# ---------------------------------------------------------
+# Unity Catalog Volumes replace legacy mount points (/mnt/).
+# Volumes provide governed, cataloged access to files and
+# support direct /Volumes/... paths in Spark, Python, and SQL.
+# The data generator writes JSONL files here; Auto Loader
+# reads from the same path.
+
+spark.sql("""
+CREATE VOLUME IF NOT EXISTS alert_pipeline
+COMMENT 'Landing zone for raw JSONL events and streaming checkpoints'
+""")
+
+print("✓ alert_pipeline volume created")
+
+# Create subdirectories for organization
+import os
+volume_base = "/Volumes/akash_s_demo/ams/alert_pipeline"
+for subdir in ["raw_events", "checkpoints/bronze", "checkpoints/silver", "checkpoints/gold"]:
+    path = f"{volume_base}/{subdir}"
+    os.makedirs(path, exist_ok=True)
+
+print("✓ Volume subdirectories created")
+
+# COMMAND ----------
+
+# ---------------------------------------------------------
+# 3. BRONZE TABLE — Raw event ingestion
 # ---------------------------------------------------------
 # Stores every raw event exactly as received (append-only).
 # The unified schema covers all four event types:

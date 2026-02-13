@@ -37,7 +37,7 @@ from typing import List, Dict, Any
 # %run ./config          # Uncomment when running in Databricks
 
 # For standalone execution, inline the needed config values:
-RAW_EVENTS_PATH = "/mnt/alert_pipeline/raw_events"
+RAW_EVENTS_PATH = "/Volumes/akash_s_demo/ams/alert_pipeline/raw_events"
 APPLICATIONS = ["payments-api", "orders-api", "auth-service"]
 HOSTS = ["host-a", "host-b"]
 
@@ -445,18 +445,20 @@ def generate_all_events(output_path: str = None):
     if output_path is None:
         output_path = RAW_EVENTS_PATH
 
-    # In Databricks, use dbutils.fs.put or write to a volume.
-    # For local/testing, write to local filesystem.
-    local_file = "/tmp/alert_events.jsonl"
-    with open(local_file, "w") as f:
+    # Write directly to the Unity Catalog Volume path.
+    # /Volumes/... paths are accessible as regular filesystem
+    # paths in Databricks — no dbutils.fs.cp needed.
+    import os
+    os.makedirs(output_path, exist_ok=True)
+    batch_file = f"{output_path}/events_{make_id()}.jsonl"
+
+    with open(batch_file, "w") as f:
         for event in events:
             f.write(json.dumps(event) + "\n")
 
-    print(f"Wrote {total} events to {local_file}")
-    print(f"Copy to DBFS with: dbutils.fs.cp('file:{local_file}', "
-          f"'{output_path}/events_{make_id()}.jsonl')")
+    print(f"Wrote {total} events to {batch_file}")
 
-    return events, local_file
+    return events, batch_file
 
 
 # ---------------------------------------------------------
@@ -465,14 +467,8 @@ def generate_all_events(output_path: str = None):
 # DATABRICKS ENTRY POINT
 # Uncomment the following block when running as a Databricks notebook:
 
-# events, local_path = generate_all_events()
-#
-# # Copy to the Auto Loader landing zone
-# import os
-# batch_id = os.path.basename(local_path).replace(".jsonl", "")
-# target = f"{RAW_EVENTS_PATH}/events_{batch_id}.jsonl"
-# dbutils.fs.cp(f"file:{local_path}", target)
-# print(f"Uploaded to {target}")
+# events, file_path = generate_all_events()
+# print(f"Events ready for Auto Loader at: {RAW_EVENTS_PATH}")
 
 # ---------------------------------------------------------
 # For local testing:
