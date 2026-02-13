@@ -146,12 +146,13 @@ silver_query = (
     .option("checkpointLocation", SILVER_CHECKPOINT)
     .queryName("silver_dedup")
 
-    # --- Choose ONE trigger mode ---
-    # Production:
-    # .trigger(processingTime="1 minute")
+    # Continuous: process new Bronze alerts every 30 seconds.
+    # Slightly slower cadence than Bronze to let batches accumulate
+    # for more efficient dedup window aggregation.
+    .trigger(processingTime="30 seconds")
 
-    # Development:
-    .trigger(availableNow=True)
+    # For one-shot backfill, comment the above and uncomment:
+    # .trigger(availableNow=True)
 
     .toTable(SILVER_TABLE)
 )

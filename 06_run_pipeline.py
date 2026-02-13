@@ -8,6 +8,13 @@
 #   in the correct order.  Useful for demos, testing, and
 #   development.
 #
+# HOW IT WORKS:
+#   1. Setup: create catalog, schema, volume, tables
+#   2. Start Bronze/Silver/Gold streaming queries (continuous)
+#   3. Start data generator (drip-feeds files into Volume)
+#   4. Streams pick up files as they arrive
+#   5. After generator finishes, run LLM summarization batch
+#
 #   In production, each step would be a separate Task in a
 #   Databricks Workflow (DAG), with dependencies configured
 #   in the Workflow UI or via Terraform/Pulumi.
@@ -16,71 +23,79 @@
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 0: SETUP — Create catalog, schema, tables
+# STEP 0: SETUP — Create catalog, schema, volume, tables
 # ---------------------------------------------------------
 # %run ./00_setup
 
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 1: GENERATE SYNTHETIC DATA
+# STEP 1: IMPORT DATA GENERATOR (don't generate yet)
 # ---------------------------------------------------------
 # %run ./01_data_generator
 
-# Generate events and upload to the landing zone
-# events, local_path = generate_all_events()
-# dbutils.fs.cp(f"file:{local_path}",
-#               f"{RAW_EVENTS_PATH}/events_batch1.jsonl")
-
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 2: BRONZE INGESTION (Auto Loader)
+# STEP 2: START BRONZE STREAM (continuous)
 # ---------------------------------------------------------
+# Start the Bronze Auto Loader stream FIRST.
+# It polls the Volume landing zone every 10 seconds for
+# new JSONL files.
+
 # %run ./02_bronze_ingestion
 
-# Wait for Bronze stream to finish (availableNow mode)
-# query.awaitTermination()
-# print(f"Bronze: {spark.sql('SELECT COUNT(*) FROM {BRONZE_TABLE}').collect()[0][0]} rows")
-
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 3: SILVER DEDUPLICATION
+# STEP 3: START SILVER STREAM (continuous)
 # ---------------------------------------------------------
+# Reads new alert events from Bronze every 30 seconds,
+# deduplicates by fingerprint within 5-minute windows.
+
 # %run ./03_silver_dedup
 
-# Wait for Silver stream to finish
-# silver_query.awaitTermination()
-# print(f"Silver: {spark.sql('SELECT COUNT(*) FROM {SILVER_TABLE}').collect()[0][0]} rows")
-
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 4: GOLD CORRELATION + CONTEXT BUILD
+# STEP 4: START GOLD STREAM (continuous)
 # ---------------------------------------------------------
+# Reads new deduplicated alerts from Silver every 60 seconds,
+# correlates with Bronze context, builds incident bundles.
+
 # %run ./04_gold_correlation
 
-# Wait for Gold stream to finish
-# gold_query.awaitTermination()
-# print(f"Gold: {spark.sql('SELECT COUNT(*) FROM {GOLD_TABLE}').collect()[0][0]} rows")
+# COMMAND ----------
+
+# ---------------------------------------------------------
+# STEP 5: START DATA GENERATOR (drip-feed into Volume)
+# ---------------------------------------------------------
+# NOW start writing events.  The three streams above are
+# already running and will pick up files as they land.
+#
+# stream_events_to_volume() writes ~20 events per file
+# every 5 seconds.  ~500 events / 20 per file = ~25 files
+# over ~2 minutes.
+
+# events = generate_all_events()
+# stream_events_to_volume(events)
 
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 5: LLM SUMMARIZATION (Batch SQL)
+# STEP 6: WAIT FOR PIPELINE TO DRAIN
 # ---------------------------------------------------------
-# Run the SQL file — this can also be a separate SQL task
-# in a Databricks Workflow.
+# After the generator finishes, give the streams time to
+# process the last few batches before checking results.
 
-# spark.sql(open("05_llm_summarization.sql").read())
-# OR use:
-# %run ./05_llm_summarization
+import time
+# print("Waiting 90 seconds for streams to finish processing...")
+# time.sleep(90)
 
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# STEP 6: VERIFY END-TO-END
+# STEP 7: VERIFY STREAMING RESULTS
 # ---------------------------------------------------------
 
 print("=" * 60)
@@ -100,8 +115,34 @@ for table_name, label in [
     except Exception as e:
         print(f"  {label}: ERROR — {e}")
 
-# Show Gold incidents with summaries
-print("\n--- Gold Incidents ---")
+# COMMAND ----------
+
+# ---------------------------------------------------------
+# STEP 8: LLM SUMMARIZATION (Batch SQL)
+# ---------------------------------------------------------
+# Run AFTER streaming data has landed in Gold.
+# This is a batch operation — not part of the streaming DAG.
+
+# spark.sql("""
+#     UPDATE akash_s_demo.ams.gold_incidents
+#     SET summary = ai_summarize(
+#         CONCAT(
+#             'Summarize this incident in 5 lines. ',
+#             'Then provide on separate labeled lines: ',
+#             '1. Root Cause: <most likely root cause>. ',
+#             '2. Confidence: <score between 0 and 1>. ',
+#             incident_context_text
+#         )
+#     )
+#     WHERE summary IS NULL
+# """)
+
+# COMMAND ----------
+
+# ---------------------------------------------------------
+# STEP 9: INSPECT RESULTS
+# ---------------------------------------------------------
+
 # display(
 #     spark.sql("""
 #         SELECT incident_id, alert_type, application_id,
@@ -113,3 +154,13 @@ print("\n--- Gold Incidents ---")
 #         ORDER BY alert_timestamp
 #     """)
 # )
+
+# COMMAND ----------
+
+# ---------------------------------------------------------
+# STEP 10: STOP STREAMS (when done)
+# ---------------------------------------------------------
+# for stream in spark.streams.active:
+#     print(f"Stopping {stream.name}...")
+#     stream.stop()
+# print("All streams stopped.")

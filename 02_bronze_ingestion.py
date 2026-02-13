@@ -135,10 +135,15 @@ bronze_stream = (
 #   If the stream restarts, it resumes from the last
 #   committed micro-batch offset.
 #
-# trigger(availableNow=True): processes all available files
-#   then stops.  In production, replace with:
-#     .trigger(processingTime="30 seconds")
-#   for continuous streaming.
+# TRIGGER MODES:
+#   processingTime="10 seconds"  — Continuous: polls for new
+#     files every 10 seconds.  Use this with the data generator's
+#     stream_events_to_volume() which drip-feeds JSONL files.
+#     Auto Loader discovers each new file and processes it in
+#     the next micro-batch.
+#
+#   availableNow=True — One-shot: processes all available files
+#     then stops.  Use for backfill or testing ONLY.
 
 query = (
     bronze_stream.writeStream
@@ -148,31 +153,33 @@ query = (
     .option("mergeSchema", "true")     # Handles minor schema evolution
     .queryName("bronze_ingestion")
 
-    # --- Choose ONE trigger mode ---
-    # Production (continuous):
-    # .trigger(processingTime="30 seconds")
+    # Continuous streaming: checks for new files every 10 seconds.
+    # The data generator writes a new JSONL file every 5 seconds,
+    # so each micro-batch picks up ~1-2 new files.
+    .trigger(processingTime="10 seconds")
 
-    # Development / backfill (process all, then stop):
-    .trigger(availableNow=True)
+    # For one-shot backfill, comment the above and uncomment:
+    # .trigger(availableNow=True)
 
     .toTable(BRONZE_TABLE)
 )
 
 print(f"Bronze ingestion stream started → {BRONZE_TABLE}")
-print(f"Checkpoint: {BRONZE_CHECKPOINT}")
+print(f"Trigger: processingTime=10s | Checkpoint: {BRONZE_CHECKPOINT}")
 
 # COMMAND ----------
 
 # ---------------------------------------------------------
-# 5. MONITOR (optional)
+# 5. MONITOR
 # ---------------------------------------------------------
-# In a Databricks notebook, you can view the streaming
-# query's progress in the cell output.  For programmatic
-# monitoring:
-
-# query.awaitTermination()   # Block until stream stops
-# query.status               # Current status dict
-# query.recentProgress       # Last few micro-batch stats
-
-# To verify data landed:
-# display(spark.sql(f"SELECT event_type, COUNT(*) FROM {BRONZE_TABLE} GROUP BY 1"))
+# The stream runs continuously. To watch it:
+#
+#   query.status               # Current status dict
+#   query.recentProgress       # Last few micro-batch stats
+#   query.awaitTermination()   # Block until manually stopped
+#
+# To check data landing in real-time:
+#   display(spark.sql(f"SELECT event_type, COUNT(*) FROM {BRONZE_TABLE} GROUP BY 1"))
+#
+# To stop the stream:
+#   query.stop()

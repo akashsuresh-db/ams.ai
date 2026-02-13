@@ -409,12 +409,13 @@ gold_query = (
     .option("checkpointLocation", GOLD_CHECKPOINT)
     .queryName("gold_correlation")
 
-    # --- Choose ONE trigger mode ---
-    # Production:
-    # .trigger(processingTime="2 minutes")
+    # Continuous: process new Silver alerts every 60 seconds.
+    # Gold correlation involves a batch JOIN against Bronze,
+    # so a slightly longer interval reduces redundant reads.
+    .trigger(processingTime="60 seconds")
 
-    # Development:
-    .trigger(availableNow=True)
+    # For one-shot backfill, comment the above and uncomment:
+    # .trigger(availableNow=True)
 
     .start()
 )

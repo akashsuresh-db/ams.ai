@@ -411,44 +411,132 @@ def scenario_infra_restart(base_time: datetime) -> List[Dict]:
 
 
 # ---------------------------------------------------------
-# MAIN — Assemble, Interleave, Write
+# MAIN — Assemble and Sort All Events
 # ---------------------------------------------------------
 
-def generate_all_events(output_path: str = None):
+def generate_all_events() -> List[Dict]:
     """
     Assemble events from all three scenarios plus noise,
-    sort by timestamp to interleave, and write JSONL.
+    sort by timestamp to produce an interleaved timeline.
+    Returns the full sorted list (does NOT write to disk).
     """
     random.seed(42)  # Reproducibility
 
-    # Base time: a fixed reference point
     base = datetime(2026, 2, 14, 6, 0, 0)
 
-    # Scenario timelines (staggered starts)
     events = []
     events += scenario_deployment_incident(base)
     events += scenario_memory_leak(base + timedelta(minutes=10))
     events += scenario_infra_restart(base + timedelta(minutes=50))
 
-    # Noise events spread across the full 90-minute window
     noise_count = random.randint(200, 300)
     events += generate_noise(base, noise_count)
 
-    # Sort all events by timestamp to produce an interleaved stream
     events.sort(key=lambda e: e["timestamp"])
 
     total = len(events)
     print(f"Generated {total} events "
           f"(target: 400–600, {'OK' if 400 <= total <= 600 else 'ADJUST NOISE'})")
 
-    # ----- Write output -----
+    return events
+
+
+# ---------------------------------------------------------
+# STREAMING WRITER — Drip-feed events as micro-batch files
+# ---------------------------------------------------------
+#
+# WHY MULTIPLE FILES WITH DELAYS:
+#   Auto Loader (cloudFiles) triggers a new micro-batch each
+#   time it discovers new files in the landing zone.  If we
+#   dump all 500 events into ONE file, Auto Loader processes
+#   everything in a single batch — that's not streaming.
+#
+#   By writing events in small chunks (BATCH_SIZE) with a
+#   delay between each file, we simulate a realistic data
+#   source: events arrive continuously over time, and the
+#   Bronze stream picks them up incrementally.
+#
+#   Each file gets a unique name (UUID + sequence number)
+#   so Auto Loader never re-processes the same file.
+
+import os
+import time
+
+BATCH_SIZE = 20           # Events per JSONL file
+DELAY_BETWEEN_BATCHES = 5 # Seconds between file writes
+
+
+def stream_events_to_volume(events: List[Dict],
+                            output_path: str = None,
+                            batch_size: int = BATCH_SIZE,
+                            delay_seconds: float = DELAY_BETWEEN_BATCHES):
+    """
+    Write events in small batches to the Volume landing zone,
+    pausing between each file to simulate a real-time stream.
+
+    Auto Loader will discover each new file as it appears and
+    trigger a new micro-batch in the Bronze streaming query.
+
+    Args:
+        events:        Full sorted event list
+        output_path:   Volume path for JSONL files
+        batch_size:    Number of events per file (default 20)
+        delay_seconds: Pause between file writes (default 5s)
+    """
     if output_path is None:
         output_path = RAW_EVENTS_PATH
 
-    # Write directly to the Unity Catalog Volume path.
-    # /Volumes/... paths are accessible as regular filesystem
-    # paths in Databricks — no dbutils.fs.cp needed.
-    import os
+    os.makedirs(output_path, exist_ok=True)
+
+    total_events = len(events)
+    num_batches = (total_events + batch_size - 1) // batch_size
+    run_id = make_id()
+
+    print(f"Streaming {total_events} events in {num_batches} batches "
+          f"({batch_size} events/file, {delay_seconds}s delay)")
+    print(f"Landing zone: {output_path}")
+    print("-" * 50)
+
+    for batch_num in range(num_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min(start_idx + batch_size, total_events)
+        batch_events = events[start_idx:end_idx]
+
+        # Unique filename: run_id + sequence number
+        filename = f"events_{run_id}_batch{batch_num:04d}.jsonl"
+        filepath = f"{output_path}/{filename}"
+
+        with open(filepath, "w") as f:
+            for event in batch_events:
+                f.write(json.dumps(event) + "\n")
+
+        # Show progress with event type breakdown
+        types = {}
+        for e in batch_events:
+            types[e["event_type"]] = types.get(e["event_type"], 0) + 1
+        type_str = ", ".join(f"{k}:{v}" for k, v in sorted(types.items()))
+
+        print(f"  Batch {batch_num + 1}/{num_batches}: "
+              f"wrote {len(batch_events)} events [{type_str}] → {filename}")
+
+        # Pause between batches (skip delay after the last one)
+        if batch_num < num_batches - 1:
+            time.sleep(delay_seconds)
+
+    print("-" * 50)
+    print(f"Done. {total_events} events written across "
+          f"{num_batches} files in {output_path}")
+
+
+def write_all_at_once(events: List[Dict],
+                      output_path: str = None):
+    """
+    Fallback: write all events into a single JSONL file.
+    Use this only for backfill/testing, NOT for streaming demos.
+    """
+    if output_path is None:
+        output_path = RAW_EVENTS_PATH
+
     os.makedirs(output_path, exist_ok=True)
     batch_file = f"{output_path}/events_{make_id()}.jsonl"
 
@@ -456,25 +544,36 @@ def generate_all_events(output_path: str = None):
         for event in events:
             f.write(json.dumps(event) + "\n")
 
-    print(f"Wrote {total} events to {batch_file}")
-
-    return events, batch_file
+    print(f"Wrote {len(events)} events to {batch_file}")
+    return batch_file
 
 
 # ---------------------------------------------------------
 # COMMAND ----------
 
+# =========================================================
 # DATABRICKS ENTRY POINT
-# Uncomment the following block when running as a Databricks notebook:
-
-# events, file_path = generate_all_events()
-# print(f"Events ready for Auto Loader at: {RAW_EVENTS_PATH}")
+# =========================================================
+# Run this cell to start drip-feeding events into the Volume.
+# IMPORTANT: Start the Bronze streaming query (02_bronze_ingestion)
+# FIRST, then run this generator so Auto Loader can pick up
+# files as they arrive.
+#
+# Option A — Streaming mode (recommended for demo):
+#   events = generate_all_events()
+#   stream_events_to_volume(events)
+#
+# Option B — Bulk mode (for backfill/testing):
+#   events = generate_all_events()
+#   write_all_at_once(events)
 
 # ---------------------------------------------------------
 # For local testing:
 if __name__ == "__main__":
-    events, path = generate_all_events()
+    events = generate_all_events()
     # Print a sample
     for e in events[:5]:
         print(json.dumps(e, indent=2))
     print(f"... ({len(events)} total events)")
+    print("\nIn Databricks, call stream_events_to_volume(events) "
+          "to drip-feed into the Volume.")
