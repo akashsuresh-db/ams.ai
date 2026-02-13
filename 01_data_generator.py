@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
 # ---------------------------------------------------------
+
 # COMMAND ----------
 
 # %run ./config          # Uncomment when running in Databricks
@@ -549,6 +550,7 @@ def write_all_at_once(events: List[Dict],
 
 
 # ---------------------------------------------------------
+
 # COMMAND ----------
 
 # =========================================================
@@ -560,20 +562,24 @@ def write_all_at_once(events: List[Dict],
 # files as they arrive.
 #
 # Option A — Streaming mode (recommended for demo):
-#   events = generate_all_events()
-#   stream_events_to_volume(events)
+events = generate_all_events()
+stream_events_to_volume(events)
 #
 # Option B — Bulk mode (for backfill/testing):
 #   events = generate_all_events()
 #   write_all_at_once(events)
 
 # ---------------------------------------------------------
-# For local testing:
-if __name__ == "__main__":
-    events = generate_all_events()
-    # Print a sample
-    for e in events[:5]:
-        print(json.dumps(e, indent=2))
-    print(f"... ({len(events)} total events)")
-    print("\nIn Databricks, call stream_events_to_volume(events) "
-          "to drip-feed into the Volume.")
+# # For local testing:
+# if __name__ == "__main__":
+#     events = generate_all_events()
+#     # Print a sample
+#     for e in events[:5]:
+#         print(json.dumps(e, indent=2))
+#     print(f"... ({len(events)} total events)")
+#     print("\nIn Databricks, call stream_events_to_volume(events) "
+#           "to drip-feed into the Volume.")
+
+# COMMAND ----------
+
+

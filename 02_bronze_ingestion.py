@@ -23,6 +23,10 @@
 
 # COMMAND ----------
 
+# MAGIC %run ./config
+
+# COMMAND ----------
+
 # %run ./config
 
 # Inline config for standalone reference
@@ -107,6 +111,7 @@ raw_stream = (
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 6
 # ---------------------------------------------------------
 # 3. ADD INGESTION METADATA
 # ---------------------------------------------------------
@@ -120,11 +125,12 @@ bronze_stream = (
     .withColumn("timestamp",
                 col("timestamp").cast(TimestampType()))
     .withColumn("_ingested_at", current_timestamp())
-    .withColumn("_source_file", input_file_name())
+    .withColumn("_source_file", col("_metadata.file_path"))
 )
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 7
 # ---------------------------------------------------------
 # 4. STREAMING WRITE TO DELTA
 # ---------------------------------------------------------
@@ -156,10 +162,10 @@ query = (
     # Continuous streaming: checks for new files every 10 seconds.
     # The data generator writes a new JSONL file every 5 seconds,
     # so each micro-batch picks up ~1-2 new files.
-    .trigger(processingTime="10 seconds")
+    # .trigger(processingTime="10 seconds")
 
     # For one-shot backfill, comment the above and uncomment:
-    # .trigger(availableNow=True)
+    .trigger(availableNow=True)
 
     .toTable(BRONZE_TABLE)
 )
@@ -179,7 +185,16 @@ print(f"Trigger: processingTime=10s | Checkpoint: {BRONZE_CHECKPOINT}")
 #   query.awaitTermination()   # Block until manually stopped
 #
 # To check data landing in real-time:
-#   display(spark.sql(f"SELECT event_type, COUNT(*) FROM {BRONZE_TABLE} GROUP BY 1"))
+display(spark.sql(f"SELECT event_type, COUNT(*) FROM {BRONZE_TABLE} GROUP BY 1"))
 #
 # To stop the stream:
 #   query.stop()
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from  akash_s_demo.ams.bronze_events
+
+# COMMAND ----------
+
+

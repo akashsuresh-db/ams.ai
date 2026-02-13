@@ -125,6 +125,7 @@ deduped_alerts = (
 
 # COMMAND ----------
 
+# DBTITLE 1,Untitled
 # ---------------------------------------------------------
 # 3. WRITE DEDUPLICATED ALERTS TO SILVER
 # ---------------------------------------------------------
@@ -149,7 +150,7 @@ silver_query = (
     # Continuous: process new Bronze alerts every 30 seconds.
     # Slightly slower cadence than Bronze to let batches accumulate
     # for more efficient dedup window aggregation.
-    .trigger(processingTime="30 seconds")
+    .trigger(availableNow=True)
 
     # For one-shot backfill, comment the above and uncomment:
     # .trigger(availableNow=True)
@@ -168,12 +169,12 @@ print(f"Dedup window: {DEDUP_WINDOW_MINUTES} min | "
 # ---------------------------------------------------------
 # Uncomment to inspect results:
 #
-# display(
-#     spark.sql(f"""
-#         SELECT fingerprint, alert_type, application_id,
-#                first_seen_timestamp, last_seen_timestamp,
-#                suppressed_count
-#         FROM {SILVER_TABLE}
-#         ORDER BY first_seen_timestamp
-#     """)
-# )
+display(
+    spark.sql(f"""
+        SELECT fingerprint, alert_type, application_id,
+               first_seen_timestamp, last_seen_timestamp,
+               suppressed_count
+        FROM {SILVER_TABLE}
+        ORDER BY first_seen_timestamp
+    """)
+)
