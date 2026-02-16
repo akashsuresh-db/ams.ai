@@ -48,7 +48,7 @@ BRONZE_TABLE      = "akash_s_demo.ams.bronze_events"
 SILVER_TABLE      = "akash_s_demo.ams.silver_alerts"
 SILVER_CHECKPOINT = "/Volumes/akash_s_demo/ams/alert_pipeline/checkpoints/silver"
 DEDUP_WINDOW_MINUTES = 5
-WATERMARK_DELAY      = "10 minutes"
+WATERMARK_DELAY      = "1 minutes"
 
 # COMMAND ----------
 
@@ -129,31 +129,30 @@ deduped_alerts = (
 # ---------------------------------------------------------
 # 3. WRITE DEDUPLICATED ALERTS TO SILVER
 # ---------------------------------------------------------
-# outputMode("update"):
-#   In stateful aggregation with watermark, Spark emits
-#   updated aggregates as new events arrive in the window.
-#   Once the watermark passes, the window is finalized.
-#   "update" mode writes only changed rows, minimizing I/O.
+# outputMode("append"):
+#   Delta Lake does not support "update" mode for streaming writes.
+#   In append mode with watermark, Spark waits until the watermark
+#   passes before emitting finalized window results. This adds
+#   latency (equal to the watermark delay) but ensures each
+#   deduplicated alert is written exactly once.
 #
 # NOTE: "complete" mode would rewrite the entire result
 #   table on every micro-batch — prohibitively expensive.
-#   "append" mode only emits after watermark, adding latency.
-#   "update" is the right balance for near-real-time dedup.
 
 silver_query = (
     deduped_alerts.writeStream
     .format("delta")
-    .outputMode("update")
+    .outputMode("append")
     .option("checkpointLocation", SILVER_CHECKPOINT)
     .queryName("silver_dedup")
 
     # Continuous: process new Bronze alerts every 30 seconds.
     # Slightly slower cadence than Bronze to let batches accumulate
     # for more efficient dedup window aggregation.
-    .trigger(processingTime="30 seconds")
+    # .trigger(processingTime="30 seconds")
 
     # For one-shot backfill, comment the above and uncomment:
-    # .trigger(availableNow=True)
+    .trigger(availableNow=True)
 
     .toTable(SILVER_TABLE)
 )
@@ -178,3 +177,16 @@ display(
         ORDER BY first_seen_timestamp
     """)
 )
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- truncate table akash_s_demo.ams.silver_alerts
+
+# COMMAND ----------
+
+# dbutils.fs.rm(SILVER_CHECKPOINT, recurse=True)
+
+# COMMAND ----------
+
+

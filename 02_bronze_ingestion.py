@@ -188,7 +188,7 @@ print(f"Trigger: processingTime=10s | Checkpoint: {BRONZE_CHECKPOINT}")
 display(spark.sql(f"SELECT event_type, COUNT(*) FROM {BRONZE_TABLE} GROUP BY 1"))
 #
 # To stop the stream:
-#   query.stop()
+# query.stop()
 
 # COMMAND ----------
 
