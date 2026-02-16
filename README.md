@@ -103,6 +103,78 @@ Execute notebooks in order (or use `06_run_pipeline.py`):
 
 ---
 
+## Known Behavior: Dedup Window vs. Data Generator Timing
+
+### Why Silver dedup windows appear shorter than 5 minutes
+
+When looking at `silver_alerts`, you may notice that `first_seen_timestamp` to `last_seen_timestamp` spans only **~25–30 seconds** even though the dedup window is configured to 5 minutes. This is **expected behavior** given how the data generator works — it is not a bug in the deduplication logic.
+
+**Root cause: the data generator emits scenario alerts in a compressed burst.**
+
+The continuous data generator (`01_data_generator.py`) injects a full incident scenario every ~2 minutes. During a scenario (e.g., Deployment Incident), it generates all repeated alerts in a tight loop:
+
+```
+T+0s   : first CPU alert
+T+5s   : repeated CPU alert      ← SCENARIO_EVENT_DELAY = 2s between file writes
+T+10s  : repeated CPU alert         + timedelta offsets of ~5s between events
+T+15s  : repeated CPU alert
+T+20s  : repeated CPU alert
+T+25s  : repeated CPU alert
+```
+
+All 6 alerts land within a **~25-second window**, not spread over 5 real minutes. The 5-minute tumbling window in Silver correctly groups them (they all fall in the same window), resulting in:
+
+```
+fingerprint: ff29103a26f1...
+first_seen:  13:26:59
+last_seen:   13:27:24    ← only ~25 seconds span
+suppressed:  5           ← correct: 6 alerts - 1 kept = 5 suppressed
+```
+
+### What would happen with real production data
+
+In a real production environment, monitoring systems like Prometheus, Datadog, or CloudWatch fire alerts at their configured evaluation interval (typically every 30–60 seconds). A CPU > 80% alert would fire like:
+
+```
+T+0 min  : CPU alert fires
+T+1 min  : CPU alert fires again (same fingerprint)
+T+2 min  : CPU alert fires again
+T+3 min  : CPU alert fires again
+T+4 min  : CPU alert fires again
+```
+
+With this spacing, the 5-minute dedup window would show:
+```
+first_seen:  14:00:00
+last_seen:   14:04:00    ← full 4-minute span
+suppressed:  4
+```
+
+### Why we kept the generator this way
+
+The compressed timing in the generator is a deliberate trade-off for demo purposes:
+
+1. **Fast feedback loop**: A scenario completes in ~30 seconds instead of waiting 5+ real minutes. You can see data flow through Bronze → Silver → Gold → Platinum within a few minutes of starting the pipeline.
+2. **Dedup logic is correct regardless of timing**: Whether alerts arrive 5 seconds apart or 60 seconds apart, the fingerprint-based tumbling window groups them identically. The `suppressed_count` is accurate.
+3. **Testing scenarios cycle faster**: With `SCENARIO_INTERVAL = 120s`, you see all three scenarios (deployment, memory leak, infra restart) within 6 minutes. At real-time spacing, a single deployment incident would take 35+ minutes to complete.
+
+### How to verify dedup is working correctly
+
+Even with compressed timing, you can confirm correct behavior:
+
+| Check | Expected |
+|-------|----------|
+| Same fingerprint appears once per 5-min window | Yes — `ff29103a26f1...` never duplicates within one window |
+| `suppressed_count` matches (total alerts - 1) | Yes — 6 repeated CPU alerts → suppressed_count = 5 |
+| Different fingerprints are NOT merged | Yes — `cpu_high` and `error_rate_high` remain separate rows |
+| Alerts crossing a window boundary split into two rows | Yes — visible in the historic data where one fingerprint has two rows |
+
+### If you want real-time spacing
+
+To make the generator spread alerts over actual minutes (matching production behavior), you would need to change the scenario functions to use real `time.sleep(60)` delays between repeated alerts instead of `timedelta(seconds=5)` offsets. This means a single scenario would take ~5 minutes to complete instead of ~25 seconds, and `SCENARIO_INTERVAL` would need to increase to ~10 minutes to avoid overlap.
+
+---
+
 ## Architectural Decisions
 
 ### Why Deduplication Must Be Deterministic
