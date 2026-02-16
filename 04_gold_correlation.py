@@ -451,7 +451,8 @@ display(
     spark.sql(f"""
         SELECT incident_id, alert_type, application_id,
                alert_timestamp, prior_alert_count,
-               LEFT(incident_context_text, 200) AS context_preview
+               LEFT(incident_context_text, 200) AS context_preview,
+               incident_context_text
         FROM {GOLD_TABLE}
         ORDER BY alert_timestamp
     """)

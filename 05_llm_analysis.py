@@ -58,10 +58,11 @@
 # Inline config for standalone reference
 GOLD_TABLE     = "akash_s_demo.ams.gold_incidents"
 PLATINUM_TABLE = "akash_s_demo.ams.platinum_incidents"
-LLM_ENDPOINT   = "databricks-meta-llama-3-3-70b-instruct"
+LLM_ENDPOINT   = "databricks-gpt-oss-120b"
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 3
 # ---------------------------------------------------------
 # 1. CREATE PLATINUM TABLE VIA CTAS
 # ---------------------------------------------------------
@@ -197,15 +198,15 @@ SELECT
     prior_alert_count,
     incident_context_text,
 
-    -- Parsed LLM fields
-    get_json_object(llm_response, '$.summary')            AS summary,
-    get_json_object(llm_response, '$.patterns')            AS patterns,
-    get_json_object(llm_response, '$.root_cause')          AS root_cause,
+    -- Parsed LLM fields (access .result from the STRUCT)
+    get_json_object(llm_response.result, '$.summary')            AS summary,
+    get_json_object(llm_response.result, '$.patterns')            AS patterns,
+    get_json_object(llm_response.result, '$.root_cause')          AS root_cause,
     CAST(
-        get_json_object(llm_response, '$.confidence_score')
+        get_json_object(llm_response.result, '$.confidence_score')
         AS DOUBLE
     )                                                       AS confidence_score,
-    get_json_object(llm_response, '$.recommended_action')  AS recommended_action,
+    get_json_object(llm_response.result, '$.recommended_action')  AS recommended_action,
 
     -- Raw LLM response preserved for debugging
     llm_response                                            AS llm_raw_response,
@@ -269,3 +270,12 @@ print(f"  Analyzed:         {total - failed}")
 print(f"  Failed (retry):   {failed}")
 if failed > 0:
     print(f"  → Re-run this notebook to retry failed rows")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from akash_s_demo.ams.platinum_incidents
+
+# COMMAND ----------
+
+
