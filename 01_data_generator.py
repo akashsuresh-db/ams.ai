@@ -1,37 +1,47 @@
 # Databricks notebook source
 # =========================================================
-# 01_data_generator.py — Synthetic Streaming Data Generator
+# 01_data_generator.py — Continuous Streaming Data Generator
 # =========================================================
 #
 # PURPOSE:
-#   Generates 400–600 realistic, interleaved JSONL events
-#   that simulate three distinct operational scenarios plus
-#   background noise. The output is written to a landing
-#   zone for Auto Loader to pick up.
+#   Generates a continuous, infinite stream of realistic JSONL
+#   events using real-time timestamps. Writes small batch files
+#   to the Volume landing zone every few seconds for Auto Loader
+#   to pick up incrementally.
+#
+#   Runs FOREVER until manually interrupted (cancel the cell
+#   in Databricks, or Ctrl+C locally).
+#
+# HOW IT WORKS:
+#   - Every EMIT_INTERVAL seconds, generates a small batch of
+#     3–8 noise events (metrics, logs, warnings) with NOW()
+#     timestamps across all applications and hosts.
+#   - Periodically (every SCENARIO_INTERVAL seconds), injects
+#     a full incident scenario (deployment incident, memory leak,
+#     or infra restart) on top of the noise.
+#   - Scenarios rotate: cycle 1 = deployment incident,
+#     cycle 2 = memory leak, cycle 3 = infra restart, repeat.
+#   - Each batch is written as a separate JSONL file so
+#     Auto Loader triggers a new micro-batch per file.
 #
 # SCENARIOS:
 #   1. Deployment-Induced Incident  (payments-api, host-a)
 #   2. Memory Leak with no deploy   (orders-api, host-b)
 #   3. Infra Restart / noise         (auth-service, host-a)
 #
-# DESIGN DECISIONS:
-#   - Fingerprints are deterministic hashes so downstream
-#     deduplication is reproducible.
-#   - Timestamps are spaced 30–60 s apart globally but
-#     scenario-internal timing follows the spec (e.g.,
-#     repeated alerts every 60 s for 5 minutes).
-#   - Events are shuffled by timestamp at the end to
-#     simulate a realistic interleaved stream.
+# TO STOP:
+#   - In Databricks: click "Cancel" on the running cell
+#   - Locally: Ctrl+C
 # =========================================================
 
 import json
 import uuid
 import hashlib
 import random
+import os
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
-
-# ---------------------------------------------------------
 
 # COMMAND ----------
 
@@ -41,6 +51,14 @@ from typing import List, Dict, Any
 RAW_EVENTS_PATH = "/Volumes/akash_s_demo/ams/alert_pipeline/raw_events"
 APPLICATIONS = ["payments-api", "orders-api", "auth-service"]
 HOSTS = ["host-a", "host-b"]
+
+# ---------------------------------------------------------
+# TUNING PARAMETERS
+# ---------------------------------------------------------
+EMIT_INTERVAL = 5          # Seconds between each noise batch file
+NOISE_BATCH_SIZE = 5       # Noise events per emit cycle (3–8 range)
+SCENARIO_INTERVAL = 120    # Seconds between scenario injections
+SCENARIO_EVENT_DELAY = 2   # Seconds between files during a scenario burst
 
 # ---------------------------------------------------------
 # HELPERS
@@ -61,14 +79,19 @@ def fingerprint(alert_type: str, app: str, host: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def now() -> datetime:
+    """Current UTC time — all events use real-time timestamps."""
+    return datetime.utcnow()
+
+
 def ts_iso(dt: datetime) -> str:
     """ISO-8601 timestamp string."""
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def jitter(seconds_low: int = 30, seconds_high: int = 60) -> timedelta:
-    """Random inter-event gap."""
-    return timedelta(seconds=random.randint(seconds_low, seconds_high))
+def jitter_seconds(low: int = 0, high: int = 3) -> timedelta:
+    """Small random offset to avoid perfectly aligned timestamps."""
+    return timedelta(seconds=random.randint(low, high))
 
 
 # ---------------------------------------------------------
@@ -175,26 +198,24 @@ def make_deployment(ts: datetime, app: str, host: str,
 
 
 # ---------------------------------------------------------
-# NOISE GENERATOR
+# NOISE GENERATOR (real-time, small batch)
 # ---------------------------------------------------------
 
-def generate_noise(base_time: datetime, count: int) -> List[Dict]:
+def generate_noise_batch(count: int = NOISE_BATCH_SIZE) -> List[Dict]:
     """
-    Background noise: normal metrics, INFO logs, occasional
-    low-severity alerts that self-resolve.  Spread across
-    all applications and hosts.
+    Generate a small batch of background noise events with
+    NOW() timestamps. Called every EMIT_INTERVAL seconds.
     """
     events = []
-    t = base_time
+    t = now()
 
-    for _ in range(count):
+    for i in range(count):
         app = random.choice(APPLICATIONS)
         host = random.choice(HOSTS)
-        t += jitter(30, 60)
+        ts = t + jitter_seconds(0, 3)
 
         roll = random.random()
         if roll < 0.45:
-            # Normal metric
             name = random.choice(["cpu_percent", "memory_percent",
                                    "error_rate", "request_latency_ms"])
             val = {
@@ -203,10 +224,8 @@ def generate_noise(base_time: datetime, count: int) -> List[Dict]:
                 "error_rate": random.uniform(0.001, 0.02),
                 "request_latency_ms": random.uniform(50, 200),
             }[name]
-            events.append(make_metric(t, app, host, name, val))
-
+            events.append(make_metric(ts, app, host, name, val))
         elif roll < 0.85:
-            # INFO / DEBUG log
             level = random.choice(["INFO", "DEBUG"])
             msgs = [
                 "Request processed successfully",
@@ -217,11 +236,10 @@ def generate_noise(base_time: datetime, count: int) -> List[Dict]:
                 "Session token rotated",
                 "Config reload completed",
             ]
-            events.append(make_log(t, app, host, level,
+            events.append(make_log(ts, app, host, level,
                                    random.choice(msgs)))
         else:
-            # Transient warning log
-            events.append(make_log(t, app, host, "WARN",
+            events.append(make_log(ts, app, host, "WARN",
                                    "Transient timeout on downstream call",
                                    error_code="TRANSIENT_TIMEOUT"))
 
@@ -229,357 +247,317 @@ def generate_noise(base_time: datetime, count: int) -> List[Dict]:
 
 
 # ---------------------------------------------------------
-# SCENARIO 1 — Deployment-Induced Incident
+# SCENARIO 1 — Deployment-Induced Incident (real-time)
 # ---------------------------------------------------------
 
-def scenario_deployment_incident(base_time: datetime) -> List[Dict]:
+def scenario_deployment_incident_rt() -> List[List[Dict]]:
     """
-    Timeline:
-      T+0        : deployment of v2.4.1 on payments-api / host-a
-      T+25 min   : error_rate starts climbing
-      T+30 min   : CPU spike, first alert fires
-      T+31–35 min: repeated CPU alerts every 60 s (same fingerprint)
-      T+30–35 min: error logs (TimeoutException, DBConnectionError)
+    Returns a list of event batches to be written with delays
+    between them, simulating a deployment incident unfolding
+    over several minutes using real-time timestamps.
+
+    Each inner list is one file write. The caller sleeps
+    SCENARIO_EVENT_DELAY seconds between writes.
     """
-    events = []
-    app, host = "payments-api", "host-a"
-    t0 = base_time
+    batches = []
+    app, host = "payments-api", random.choice(HOSTS)
+    version = f"v{random.randint(2,5)}.{random.randint(0,9)}.{random.randint(0,9)}"
+    t = now()
 
-    # --- Deployment ---
-    events.append(make_deployment(t0, app, host, "v2.4.1",
-                                  "rolling_update"))
-    events.append(make_log(t0 + timedelta(seconds=5), app, host,
-                           "INFO", "Deployment v2.4.1 started"))
+    # Batch 1: Deployment event
+    batches.append([
+        make_deployment(t, app, host, version, "rolling_update"),
+        make_log(t + timedelta(seconds=2), app, host,
+                 "INFO", f"Deployment {version} started"),
+    ])
 
-    # --- Pre-incident normal metrics (T+1 to T+20 min) ---
-    for m in range(1, 21):
-        t = t0 + timedelta(minutes=m)
-        events.append(make_metric(t, app, host, "cpu_percent",
-                                  random.uniform(25, 40)))
-        events.append(make_metric(t, app, host, "error_rate",
-                                  random.uniform(0.005, 0.015)))
-        if m % 3 == 0:
-            events.append(make_log(t, app, host, "INFO",
-                                   "Request handled normally"))
+    # Batch 2: Normal metrics post-deploy
+    t2 = now() + timedelta(seconds=5)
+    batches.append([
+        make_metric(t2, app, host, "cpu_percent", random.uniform(25, 40)),
+        make_metric(t2, app, host, "error_rate", random.uniform(0.005, 0.015)),
+        make_log(t2, app, host, "INFO", "Request handled normally"),
+    ])
 
-    # --- Error rate climb (T+21 to T+29 min) ---
-    for m in range(21, 30):
-        t = t0 + timedelta(minutes=m)
-        rate = 0.02 + (m - 20) * 0.012
-        events.append(make_metric(t, app, host, "error_rate",
-                                  rate))
-        events.append(make_metric(t, app, host, "cpu_percent",
-                                  random.uniform(50, 70)))
+    # Batch 3: Error rate starts climbing
+    t3 = now() + timedelta(seconds=10)
+    batches.append([
+        make_metric(t3, app, host, "error_rate", random.uniform(0.05, 0.10)),
+        make_metric(t3, app, host, "cpu_percent", random.uniform(55, 70)),
+        make_log(t3, app, host, "WARN", "Elevated error rate detected"),
+    ])
 
-    # --- Incident peak (T+30 min) ---
-    t_peak = t0 + timedelta(minutes=30)
-    events.append(make_metric(t_peak, app, host, "cpu_percent", 92.5))
-    events.append(make_metric(t_peak, app, host, "error_rate", 0.18))
-    events.append(make_alert(t_peak, app, host,
-                             "cpu_high", "CRITICAL", 80.0, 92.5))
+    # Batch 4: CPU spike + first alert
+    t4 = now() + timedelta(seconds=15)
+    cpu_val = random.uniform(85, 95)
+    batches.append([
+        make_metric(t4, app, host, "cpu_percent", cpu_val),
+        make_metric(t4, app, host, "error_rate", random.uniform(0.12, 0.20)),
+        make_alert(t4, app, host, "cpu_high", "CRITICAL", 80.0, cpu_val),
+    ])
 
-    # --- Repeated CPU alerts every 60 s for 5 minutes ---
-    for i in range(1, 6):
-        t_rep = t_peak + timedelta(minutes=i)
-        cpu_val = random.uniform(85, 95)
-        events.append(make_alert(t_rep, app, host,
-                                 "cpu_high", "CRITICAL", 80.0, cpu_val))
-        events.append(make_metric(t_rep, app, host,
-                                  "cpu_percent", cpu_val))
+    # Batches 5-9: Repeated alerts + error logs (one per minute)
+    for i in range(5):
+        ti = now() + timedelta(seconds=20 + i * 5)
+        cpu = random.uniform(85, 95)
+        error_msgs = [
+            ("TimeoutException", "TIMEOUT_CONN"),
+            ("DBConnectionError: pool exhausted", "DB_CONN_POOL"),
+            ("TimeoutException on /api/pay", "TIMEOUT_CONN"),
+            ("DBConnectionError: max retries exceeded", "DB_CONN_POOL"),
+            ("Unhandled exception in payment processor", "UNHANDLED"),
+        ]
+        msg, code = random.choice(error_msgs)
+        batch = [
+            make_alert(ti, app, host, "cpu_high", "CRITICAL", 80.0, cpu),
+            make_metric(ti, app, host, "cpu_percent", cpu),
+            make_log(ti, app, host, "ERROR", msg, error_code=code),
+        ]
+        batches.append(batch)
 
-    # --- Error logs during incident ---
-    error_messages = [
-        ("TimeoutException", "TIMEOUT_CONN"),
-        ("DBConnectionError: pool exhausted", "DB_CONN_POOL"),
-        ("TimeoutException on /api/pay", "TIMEOUT_CONN"),
-        ("DBConnectionError: max retries exceeded", "DB_CONN_POOL"),
-        ("TimeoutException on /api/refund", "TIMEOUT_CONN"),
-        ("Unhandled exception in payment processor", "UNHANDLED"),
-        ("DBConnectionError: socket closed", "DB_CONN_POOL"),
-        ("TimeoutException on /api/status", "TIMEOUT_CONN"),
-    ]
-    for i, (msg, code) in enumerate(error_messages):
-        t_err = t_peak + timedelta(seconds=30 * i)
-        events.append(make_log(t_err, app, host, "ERROR", msg,
-                               error_code=code))
+    # Batch 10: Error rate alert
+    t10 = now() + timedelta(seconds=50)
+    batches.append([
+        make_alert(t10, app, host, "error_rate_high", "HIGH", 0.05,
+                   random.uniform(0.15, 0.22)),
+    ])
 
-    # --- Error rate alert ---
-    events.append(make_alert(t_peak + timedelta(minutes=2), app, host,
-                             "error_rate_high", "HIGH", 0.05, 0.18))
-
-    return events
+    return batches
 
 
 # ---------------------------------------------------------
-# SCENARIO 2 — Memory Leak (No Deployment)
+# SCENARIO 2 — Memory Leak (real-time)
 # ---------------------------------------------------------
 
-def scenario_memory_leak(base_time: datetime) -> List[Dict]:
-    """
-    Timeline:
-      T+0 to T+40 min : memory climbs from 55% to 90%+
-      T+35 min         : first memory alert
-      T+36–40 min      : repeated memory alerts (same fingerprint)
-      No deployment event anywhere in this scenario.
-    """
-    events = []
-    app, host = "orders-api", "host-b"
-    t0 = base_time
+def scenario_memory_leak_rt() -> List[List[Dict]]:
+    """Memory gradually climbs, alerts fire, no deployment."""
+    batches = []
+    app, host = "orders-api", random.choice(HOSTS)
 
-    # --- Gradual memory increase ---
-    for m in range(0, 41):
-        t = t0 + timedelta(minutes=m)
-        # Linear ramp from 55% to ~92%
-        mem = 55.0 + (m / 40.0) * 37.0
-        events.append(make_metric(t, app, host, "memory_percent",
-                                  mem + random.uniform(-1, 1)))
-        # CPU stays normal
-        events.append(make_metric(t, app, host, "cpu_percent",
-                                  random.uniform(20, 40)))
-        # Periodic normal logs
-        if m % 5 == 0:
-            events.append(make_log(t, app, host, "INFO",
-                                   "Order queue depth: "
-                                   f"{random.randint(10, 200)}"))
+    # Batches 1-6: Gradual memory climb
+    for i in range(6):
+        ti = now() + timedelta(seconds=i * 5)
+        mem = 55.0 + i * 6.5 + random.uniform(-1, 1)
+        batch = [
+            make_metric(ti, app, host, "memory_percent", mem),
+            make_metric(ti, app, host, "cpu_percent",
+                        random.uniform(20, 40)),
+        ]
+        if i % 2 == 0:
+            batch.append(make_log(ti, app, host, "INFO",
+                                  f"Order queue depth: {random.randint(10, 200)}"))
+        batches.append(batch)
 
-    # --- First memory alert at T+35 ---
-    t_alert = t0 + timedelta(minutes=35)
-    events.append(make_alert(t_alert, app, host,
-                             "memory_high", "HIGH", 85.0, 88.7))
+    # Batch 7: First memory alert
+    t7 = now() + timedelta(seconds=32)
+    batches.append([
+        make_metric(t7, app, host, "memory_percent",
+                    random.uniform(87, 91)),
+        make_alert(t7, app, host, "memory_high", "HIGH", 85.0,
+                   random.uniform(87, 91)),
+        make_log(t7, app, host, "WARN",
+                 f"GC pause {random.randint(200, 800)}ms"),
+    ])
 
-    # --- Repeated memory alerts every 60 s for 5 minutes ---
-    for i in range(1, 6):
-        t_rep = t_alert + timedelta(minutes=i)
-        mem_val = 88.0 + random.uniform(0, 4)
-        events.append(make_alert(t_rep, app, host,
-                                 "memory_high", "HIGH", 85.0, mem_val))
-        events.append(make_log(t_rep, app, host, "WARN",
-                               f"GC pause {random.randint(200, 800)}ms"))
+    # Batches 8-12: Repeated memory alerts + degradation
+    for i in range(5):
+        ti = now() + timedelta(seconds=37 + i * 5)
+        mem_val = 88.0 + random.uniform(0, 5)
+        batches.append([
+            make_alert(ti, app, host, "memory_high", "HIGH", 85.0, mem_val),
+            make_metric(ti, app, host, "memory_percent", mem_val),
+            make_log(ti, app, host, "WARN",
+                     "Heap usage above safe threshold",
+                     error_code="HEAP_PRESSURE"),
+        ])
 
-    # --- Slow degradation logs ---
-    for i in range(0, 8):
-        t_log = t_alert + timedelta(seconds=45 * i)
-        events.append(make_log(t_log, app, host, "WARN",
-                               "Heap usage above safe threshold",
-                               error_code="HEAP_PRESSURE"))
-
-    return events
+    return batches
 
 
 # ---------------------------------------------------------
-# SCENARIO 3 — Infra Restart (Noise / Self-Healing)
+# SCENARIO 3 — Infra Restart (real-time)
 # ---------------------------------------------------------
 
-def scenario_infra_restart(base_time: datetime) -> List[Dict]:
-    """
-    Timeline:
-      T+0       : host restart log
-      T+1–2 min : brief CPU spike
-      T+2 min   : single CPU alert
-      T+3–5 min : metrics normalize
-      No sustained errors.
-    """
-    events = []
-    app, host = "auth-service", "host-a"
-    t0 = base_time
+def scenario_infra_restart_rt() -> List[List[Dict]]:
+    """Brief restart, CPU spike, single alert, self-heals."""
+    batches = []
+    app, host = "auth-service", random.choice(HOSTS)
+    t = now()
 
-    # --- Restart ---
-    events.append(make_log(t0, app, host, "WARN",
-                           "Host restarting — scheduled maintenance",
-                           error_code="HOST_RESTART"))
-    events.append(make_log(t0 + timedelta(seconds=15), app, host,
-                           "INFO", "Host boot sequence initiated"))
+    # Batch 1: Restart
+    batches.append([
+        make_log(t, app, host, "WARN",
+                 "Host restarting — scheduled maintenance",
+                 error_code="HOST_RESTART"),
+        make_log(t + timedelta(seconds=2), app, host,
+                 "INFO", "Host boot sequence initiated"),
+    ])
 
-    # --- Brief CPU spike ---
-    for s in [30, 60, 90, 120]:
-        t = t0 + timedelta(seconds=s)
-        cpu = random.uniform(70, 88)
-        events.append(make_metric(t, app, host, "cpu_percent", cpu))
+    # Batch 2: CPU spike + alert
+    t2 = now() + timedelta(seconds=8)
+    cpu = random.uniform(78, 88)
+    batches.append([
+        make_metric(t2, app, host, "cpu_percent", cpu),
+        make_alert(t2, app, host, "cpu_high", "MEDIUM", 80.0, cpu),
+    ])
 
-    # --- Single alert at T+2 min ---
-    events.append(make_alert(t0 + timedelta(minutes=2), app, host,
-                             "cpu_high", "MEDIUM", 80.0, 85.3))
+    # Batches 3-5: Normalization
+    for i in range(3):
+        ti = now() + timedelta(seconds=15 + i * 5)
+        batches.append([
+            make_metric(ti, app, host, "cpu_percent",
+                        random.uniform(15, 35)),
+            make_log(ti, app, host, "INFO",
+                     "Service health check passed"),
+        ])
 
-    # --- Normalization ---
-    for m in range(3, 8):
-        t = t0 + timedelta(minutes=m)
-        events.append(make_metric(t, app, host, "cpu_percent",
-                                  random.uniform(15, 35)))
-        events.append(make_log(t, app, host, "INFO",
-                               "Service health check passed"))
-
-    return events
+    return batches
 
 
 # ---------------------------------------------------------
-# MAIN — Assemble and Sort All Events
+# FILE WRITER
 # ---------------------------------------------------------
 
-def generate_all_events() -> List[Dict]:
-    """
-    Assemble events from all three scenarios plus noise,
-    sort by timestamp to produce an interleaved timeline.
-    Returns the full sorted list (does NOT write to disk).
-    """
-    random.seed(42)  # Reproducibility
-
-    base = datetime(2026, 2, 14, 6, 0, 0)
-
-    events = []
-    events += scenario_deployment_incident(base)
-    events += scenario_memory_leak(base + timedelta(minutes=10))
-    events += scenario_infra_restart(base + timedelta(minutes=50))
-
-    noise_count = random.randint(200, 300)
-    events += generate_noise(base, noise_count)
-
-    events.sort(key=lambda e: e["timestamp"])
-
-    total = len(events)
-    print(f"Generated {total} events "
-          f"(target: 400–600, {'OK' if 400 <= total <= 600 else 'ADJUST NOISE'})")
-
-    return events
-
-
-# ---------------------------------------------------------
-# STREAMING WRITER — Drip-feed events as micro-batch files
-# ---------------------------------------------------------
-#
-# WHY MULTIPLE FILES WITH DELAYS:
-#   Auto Loader (cloudFiles) triggers a new micro-batch each
-#   time it discovers new files in the landing zone.  If we
-#   dump all 500 events into ONE file, Auto Loader processes
-#   everything in a single batch — that's not streaming.
-#
-#   By writing events in small chunks (BATCH_SIZE) with a
-#   delay between each file, we simulate a realistic data
-#   source: events arrive continuously over time, and the
-#   Bronze stream picks them up incrementally.
-#
-#   Each file gets a unique name (UUID + sequence number)
-#   so Auto Loader never re-processes the same file.
-
-import os
-import time
-
-BATCH_SIZE = 20           # Events per JSONL file
-DELAY_BETWEEN_BATCHES = 5 # Seconds between file writes
-
-
-def stream_events_to_volume(events: List[Dict],
-                            output_path: str = None,
-                            batch_size: int = BATCH_SIZE,
-                            delay_seconds: float = DELAY_BETWEEN_BATCHES):
-    """
-    Write events in small batches to the Volume landing zone,
-    pausing between each file to simulate a real-time stream.
-
-    Auto Loader will discover each new file as it appears and
-    trigger a new micro-batch in the Bronze streaming query.
-
-    Args:
-        events:        Full sorted event list
-        output_path:   Volume path for JSONL files
-        batch_size:    Number of events per file (default 20)
-        delay_seconds: Pause between file writes (default 5s)
-    """
-    if output_path is None:
-        output_path = RAW_EVENTS_PATH
-
+def write_batch_to_volume(events: List[Dict],
+                          output_path: str,
+                          label: str = "") -> str:
+    """Write a list of events as a single JSONL file to the Volume."""
     os.makedirs(output_path, exist_ok=True)
+    filename = f"events_{make_id()}.jsonl"
+    filepath = f"{output_path}/{filename}"
 
-    total_events = len(events)
-    num_batches = (total_events + batch_size - 1) // batch_size
-    run_id = make_id()
-
-    print(f"Streaming {total_events} events in {num_batches} batches "
-          f"({batch_size} events/file, {delay_seconds}s delay)")
-    print(f"Landing zone: {output_path}")
-    print("-" * 50)
-
-    for batch_num in range(num_batches):
-        start_idx = batch_num * batch_size
-        end_idx = min(start_idx + batch_size, total_events)
-        batch_events = events[start_idx:end_idx]
-
-        # Unique filename: run_id + sequence number
-        filename = f"events_{run_id}_batch{batch_num:04d}.jsonl"
-        filepath = f"{output_path}/{filename}"
-
-        with open(filepath, "w") as f:
-            for event in batch_events:
-                f.write(json.dumps(event) + "\n")
-
-        # Show progress with event type breakdown
-        types = {}
-        for e in batch_events:
-            types[e["event_type"]] = types.get(e["event_type"], 0) + 1
-        type_str = ", ".join(f"{k}:{v}" for k, v in sorted(types.items()))
-
-        print(f"  Batch {batch_num + 1}/{num_batches}: "
-              f"wrote {len(batch_events)} events [{type_str}] → {filename}")
-
-        # Pause between batches (skip delay after the last one)
-        if batch_num < num_batches - 1:
-            time.sleep(delay_seconds)
-
-    print("-" * 50)
-    print(f"Done. {total_events} events written across "
-          f"{num_batches} files in {output_path}")
-
-
-def write_all_at_once(events: List[Dict],
-                      output_path: str = None):
-    """
-    Fallback: write all events into a single JSONL file.
-    Use this only for backfill/testing, NOT for streaming demos.
-    """
-    if output_path is None:
-        output_path = RAW_EVENTS_PATH
-
-    os.makedirs(output_path, exist_ok=True)
-    batch_file = f"{output_path}/events_{make_id()}.jsonl"
-
-    with open(batch_file, "w") as f:
+    with open(filepath, "w") as f:
         for event in events:
             f.write(json.dumps(event) + "\n")
 
-    print(f"Wrote {len(events)} events to {batch_file}")
-    return batch_file
+    types = {}
+    for e in events:
+        types[e["event_type"]] = types.get(e["event_type"], 0) + 1
+    type_str = ", ".join(f"{k}:{v}" for k, v in sorted(types.items()))
+
+    prefix = f"[{label}] " if label else ""
+    print(f"  {prefix}{len(events)} events [{type_str}] -> {filename}")
+
+    return filepath
 
 
 # ---------------------------------------------------------
+# CONTINUOUS STREAM — Runs forever
+# ---------------------------------------------------------
+
+SCENARIOS = [
+    ("Deployment Incident", scenario_deployment_incident_rt),
+    ("Memory Leak", scenario_memory_leak_rt),
+    ("Infra Restart", scenario_infra_restart_rt),
+]
+
+
+def run_continuous_stream(output_path: str = None):
+    """
+    Infinite streaming loop. Generates noise events every
+    EMIT_INTERVAL seconds, and injects a full incident scenario
+    every SCENARIO_INTERVAL seconds.
+
+    Runs forever until interrupted.
+
+    Timeline:
+      T+0s     : noise batch
+      T+5s     : noise batch
+      T+10s    : noise batch
+      ...
+      T+120s   : SCENARIO 1 injected (deployment incident)
+      T+125s   : noise resumes
+      ...
+      T+240s   : SCENARIO 2 injected (memory leak)
+      ...
+      T+360s   : SCENARIO 3 injected (infra restart)
+      T+480s   : SCENARIO 1 again (cycles repeat)
+    """
+    if output_path is None:
+        output_path = RAW_EVENTS_PATH
+
+    os.makedirs(output_path, exist_ok=True)
+
+    scenario_idx = 0
+    total_events = 0
+    total_files = 0
+    last_scenario_time = time.time()
+    start_time = time.time()
+
+    print("=" * 60)
+    print("CONTINUOUS STREAM STARTED")
+    print(f"  Landing zone:       {output_path}")
+    print(f"  Noise interval:     every {EMIT_INTERVAL}s")
+    print(f"  Scenario interval:  every {SCENARIO_INTERVAL}s")
+    print(f"  Scenarios rotate:   {' -> '.join(s[0] for s in SCENARIOS)}")
+    print(f"  Stop with:          Cancel cell / Ctrl+C")
+    print("=" * 60)
+
+    try:
+        cycle = 0
+        while True:
+            cycle += 1
+            elapsed = int(time.time() - start_time)
+
+            # --- Check if it's time to inject a scenario ---
+            if time.time() - last_scenario_time >= SCENARIO_INTERVAL:
+                name, scenario_fn = SCENARIOS[scenario_idx % len(SCENARIOS)]
+                scenario_idx += 1
+                last_scenario_time = time.time()
+
+                print(f"\n>>> INJECTING SCENARIO: {name} "
+                      f"(cycle {scenario_idx}, T+{elapsed}s)")
+
+                batches = scenario_fn()
+                for batch in batches:
+                    write_batch_to_volume(batch, output_path,
+                                          label=name)
+                    total_events += len(batch)
+                    total_files += 1
+                    time.sleep(SCENARIO_EVENT_DELAY)
+
+                print(f">>> SCENARIO COMPLETE: {name}\n")
+
+            # --- Emit noise batch ---
+            noise_count = random.randint(3, 8)
+            noise = generate_noise_batch(noise_count)
+            write_batch_to_volume(noise, output_path, label="noise")
+            total_events += len(noise)
+            total_files += 1
+
+            # Periodic status line
+            if cycle % 10 == 0:
+                print(f"  [status] T+{elapsed}s | "
+                      f"{total_events:,} events | "
+                      f"{total_files} files | "
+                      f"next scenario in "
+                      f"{int(SCENARIO_INTERVAL - (time.time() - last_scenario_time))}s")
+
+            time.sleep(EMIT_INTERVAL)
+
+    except KeyboardInterrupt:
+        elapsed = int(time.time() - start_time)
+        print(f"\n{'=' * 60}")
+        print(f"STREAM STOPPED (ran for {elapsed}s)")
+        print(f"  Total events:  {total_events:,}")
+        print(f"  Total files:   {total_files}")
+        print(f"  Scenarios run: {scenario_idx}")
+        print(f"{'=' * 60}")
+
 
 # COMMAND ----------
 
 # =========================================================
 # DATABRICKS ENTRY POINT
 # =========================================================
-# Run this cell to start drip-feeding events into the Volume.
-# IMPORTANT: Start the Bronze streaming query (02_bronze_ingestion)
-# FIRST, then run this generator so Auto Loader can pick up
-# files as they arrive.
+# This cell starts the continuous stream. It runs FOREVER
+# until you cancel it.
 #
-# Option A — Streaming mode (recommended for demo):
-events = generate_all_events()
-stream_events_to_volume(events)
+# IMPORTANT: Start the Bronze/Silver/Gold streams FIRST
+# (notebooks 02, 03, 04), then run this cell.
 #
-# Option B — Bulk mode (for backfill/testing):
-#   events = generate_all_events()
-#   write_all_at_once(events)
+# To stop: click "Cancel" on this cell.
 
-# ---------------------------------------------------------
-# # For local testing:
-# if __name__ == "__main__":
-#     events = generate_all_events()
-#     # Print a sample
-#     for e in events[:5]:
-#         print(json.dumps(e, indent=2))
-#     print(f"... ({len(events)} total events)")
-#     print("\nIn Databricks, call stream_events_to_volume(events) "
-#           "to drip-feed into the Volume.")
+run_continuous_stream()
 
 # COMMAND ----------
-
-
