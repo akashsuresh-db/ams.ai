@@ -260,6 +260,159 @@ With `trigger(processingTime="30 seconds")` (continuous mode), there is no end-o
 
 ---
 
+## How Gold Correlation & Context Building Works
+
+The Gold layer (`04_gold_correlation.py`) takes each deduplicated alert from Silver and enriches it with surrounding telemetry from Bronze, then assembles a structured text bundle (`incident_context_text`) for the LLM.
+
+### Overview
+
+```
+Silver alert (new deduplicated alert)
+    │
+    ├── 1. Join against Bronze (60-min lookback window)
+    │      └── same application_id + timestamp in [alert_time - 60 min, alert_time]
+    │
+    ├── 2. Aggregate from the joined data:
+    │      ├── Deployments  →  JSON array
+    │      ├── Error Logs   →  JSON map {error_code: count}
+    │      ├── Metrics      →  max/avg CPU, max memory, max error rate
+    │      └── Prior Alerts →  count of other alerts in window
+    │
+    ├── 3. Build incident_context_text (structured plain text)
+    │
+    └── 4. MERGE into gold_incidents (idempotent upsert)
+```
+
+### Step 1: Lookback Join
+
+Every new Silver alert is joined against the full Bronze table:
+
+```sql
+alert.application_id = bronze.application_id
+AND bronze.timestamp >= alert.first_seen_timestamp - INTERVAL 60 MINUTES
+AND bronze.timestamp <= alert.first_seen_timestamp
+```
+
+This produces a wide dataset of all Bronze events (metrics, logs, deployments, alerts) that occurred in the 60 minutes leading up to the alert.
+
+### Step 2: Aggregations
+
+Each aggregation filters the lookback join for a specific event type, groups by fingerprint, and produces a summary column.
+
+#### Deployments (`correlated_deployments`)
+
+```
+lookback_join
+  → filter: event_type = 'deployment'
+  → groupBy: fingerprint
+  → collect_list(struct(deployment_id, version, change_type, timestamp))
+  → to_json(...)
+```
+
+Result: a JSON array like `[{"deployment_id":"dep-abc","version":"v2.3.1","change_type":"rolling_update","timestamp":"2026-02-14T10:05:00"}]`
+
+If no deployments exist in the window, this is `NULL` (left join).
+
+#### Error Logs (`error_summary`)
+
+```
+lookback_join
+  → filter: event_type = 'log' AND log_level = 'ERROR' AND error_code IS NOT NULL
+  → groupBy: fingerprint, error_code
+  → count(*)
+  → collapse into: map_from_arrays(error_codes, counts)
+  → to_json(...)
+```
+
+Result: a JSON map like `{"TimeoutException":"12","DBConnectionError":"4"}`
+
+#### Metrics (`metric_summary`)
+
+```
+lookback_join
+  → filter: event_type = 'metric'
+  → groupBy: fingerprint
+  → agg:
+      max(cpu_percent)     → cpu_max
+      avg(cpu_percent)     → cpu_avg
+      max(memory_percent)  → memory_max
+      max(error_rate)      → error_rate_max
+  → to_json(struct(...))
+```
+
+Result: a JSON object like `{"cpu_max":94.5,"cpu_avg":72.1,"memory_max":68.2,"error_rate_max":0.15}`
+
+#### Prior Alerts (`prior_alert_count`)
+
+```
+lookback_join
+  → filter: event_type = 'alert' AND alert_id != current alert's alert_id
+  → groupBy: fingerprint
+  → count(*)
+```
+
+Result: an integer count of other alerts for the same app in the window.
+
+### Step 3: Context Bundle Builder (`incident_context_text`)
+
+A Python UDF takes all the aggregated columns and assembles them into a fixed-format plain-text string:
+
+```
+Incident Alert:
+cpu_high triggered on payments-api host-a
+Current value: 92.30 Threshold: 80.00
+
+Recent Deployments:
+  - v2.3.1 deployed at 2026-02-14T10:05:00 (rolling_update)
+
+Error Summary (last 60 mins):
+  - TimeoutException: 12 occurrences
+  - DBConnectionError: 4 occurrences
+
+Metric Summary:
+  - CPU max: 94.50%
+  - CPU avg: 72.10%
+  - Memory max: 68.20%
+  - Error rate max: 0.15
+
+Prior alerts in window: 3
+```
+
+The UDF parses the JSON columns back into Python objects (lists/dicts) and formats each section. If a section has no data (e.g., no deployments), it outputs `"None"`.
+
+**Why a UDF and not SQL?** The formatting requires conditional logic (null checks, list iteration, number formatting) that would be verbose and fragile in pure SQL `CONCAT()` expressions.
+
+### Step 4: MERGE to Gold
+
+The final DataFrame is written using a MERGE (upsert) on `fingerprint + alert_timestamp`:
+
+```sql
+MERGE INTO gold_incidents AS target
+USING new_incidents AS source
+ON target.fingerprint = source.fingerprint
+   AND target.alert_timestamp = source.alert_timestamp
+WHEN NOT MATCHED THEN INSERT *
+```
+
+This ensures **idempotency** — reprocessing the same micro-batch (e.g., after a restart) won't create duplicate incidents.
+
+### Column Disambiguation Note
+
+After joining alerts with Bronze and then joining multiple aggregation DataFrames back, Spark can encounter ambiguous `fingerprint` columns (the same column name from multiple sources). This is especially strict in Spark Connect.
+
+**Fix**: Each aggregation renames its `groupBy` key to a unique alias (`_fp_dep`, `_fp_err`, `_fp_met`, `_fp_pri`), joins on that alias, then drops it. This leaves only one `fingerprint` column from the original alerts DataFrame — zero ambiguity.
+
+### Why `incident_context_text` Exists
+
+This string is the **handoff boundary between deterministic and stochastic processing**:
+
+- **Gold layer** (deterministic): builds `incident_context_text` using pure Spark operations — joins, aggregations, formatting. Same input always produces the same output.
+- **Platinum layer** (stochastic): passes this exact string to `ai_query()` for LLM analysis. Different runs may produce different summaries.
+
+If the LLM gives a bad summary, you can inspect `incident_context_text` in the Gold table to verify whether the input was correct — full auditability without re-running the correlation pipeline.
+
+---
+
 ## Architectural Decisions
 
 ### Why Deduplication Must Be Deterministic
