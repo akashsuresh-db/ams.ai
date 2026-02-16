@@ -162,10 +162,10 @@ query = (
     # Continuous streaming: checks for new files every 10 seconds.
     # The data generator writes a new JSONL file every 5 seconds,
     # so each micro-batch picks up ~1-2 new files.
-    # .trigger(processingTime="10 seconds")
+    .trigger(processingTime="10 seconds")
 
     # For one-shot backfill, comment the above and uncomment:
-    .trigger(availableNow=True)
+    # .trigger(availableNow=True)
 
     .toTable(BRONZE_TABLE)
 )

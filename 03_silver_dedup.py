@@ -150,7 +150,7 @@ silver_query = (
     # Continuous: process new Bronze alerts every 30 seconds.
     # Slightly slower cadence than Bronze to let batches accumulate
     # for more efficient dedup window aggregation.
-    .trigger(availableNow=True)
+    .trigger(processingTime="30 seconds")
 
     # For one-shot backfill, comment the above and uncomment:
     # .trigger(availableNow=True)

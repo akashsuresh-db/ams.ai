@@ -430,7 +430,7 @@ gold_query = (
     # Continuous: process new Silver alerts every 60 seconds.
     # Gold correlation involves a batch JOIN against Bronze,
     # so a slightly longer interval reduces redundant reads.
-    .trigger(availableNow=True)
+    .trigger(processingTime="60 seconds")
 
     # For one-shot backfill, comment the above and uncomment:
     # .trigger(availableNow=True)
