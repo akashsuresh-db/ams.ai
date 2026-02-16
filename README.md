@@ -175,6 +175,91 @@ To make the generator spread alerts over actual minutes (matching production beh
 
 ---
 
+## How Silver Dedup Streaming Works (append mode + watermark)
+
+The Silver dedup stream uses `outputMode("append")` with a tumbling window and watermark. This is the most important streaming concept in the pipeline — understanding it is essential for debugging and tuning.
+
+### The three components
+
+| Component | Current Value | Role |
+|-----------|--------------|------|
+| **Trigger interval** | `processingTime="30 seconds"` | How often Spark checks Bronze for new alert rows |
+| **Tumbling window** | `5 minutes` | Groups alerts by fingerprint into fixed 5-minute buckets |
+| **Watermark** | `1 minute` | How long Spark waits for late-arriving data before finalizing a window |
+
+### Step-by-step: what happens each trigger cycle
+
+```
+Every 30 seconds (trigger fires):
+  1. Read new alert rows from Bronze
+  2. For each alert, determine which 5-min window it belongs to
+     (e.g., timestamp 13:21:05 → window [13:20:00, 13:25:00))
+  3. Update the aggregation in Spark's INTERNAL STATE STORE (in memory):
+     - increment count
+     - update min/max timestamps
+  4. Check: has the watermark closed any window?
+     → NO  → Write NOTHING to Silver. State keeps accumulating silently.
+     → YES → Emit the finalized window as ONE row to silver_alerts.
+             That window's state is then discarded.
+```
+
+### When does a window close?
+
+A window is finalized when Spark sees an event with a timestamp **past the window end + watermark delay**. This is the only moment a row appears in the Silver table.
+
+**Example** (5-min window, 1-min watermark):
+
+```
+Window: [13:20:00, 13:25:00)
+Closes when Spark sees an event with timestamp >= 13:26:00
+         (window end 13:25:00 + watermark 1 min)
+
+Timeline:
+  Trigger at T+30s:  alert at 13:20:54 → internal state: count=1   → Silver: (nothing)
+  Trigger at T+60s:  alert at 13:21:19 → internal state: count=6   → Silver: (nothing)
+  Trigger at T+90s:  noise only         → state unchanged           → Silver: (nothing)
+  ...
+  Trigger at T+Ns:   event at 13:26:01 arrives
+                     → watermark passes window end
+                     → Window [13:20, 13:25) is FINALIZED
+                     → ONE row written: fingerprint=ff29..., suppressed_count=5
+                     → Internal state for this window is discarded
+```
+
+### Key behaviors to understand
+
+| Question | Answer |
+|----------|--------|
+| Does Silver read from Bronze every 30 seconds? | **Yes** — the trigger interval controls how often Spark polls for new data |
+| Does Silver write to the Delta table every 30 seconds? | **No** — in `append` mode, nothing is written until a window is finalized |
+| Are intermediate aggregations visible in the table? | **No** — they exist only in Spark's internal state store (in memory). This is the key difference from `update` mode |
+| When does a row appear in Silver? | Only after the watermark passes the window's end boundary |
+| What is the actual write latency? | It depends on when the **next event** arrives after the window ends. The minimum latency is the watermark delay (1 minute past window end) |
+| What if no new events arrive after the window? | The window stays open in state indefinitely. With `availableNow=True`, Spark closes all windows at the end of the batch |
+| Can the same window produce multiple rows? | **No** — in `append` mode, each window emits exactly once |
+
+### Why `append` mode, not `update` mode
+
+The original code used `outputMode("update")`, which caused incorrect `suppressed_count` values:
+
+- In `update` mode, Spark emits **intermediate results** every time the aggregation changes
+- Delta Lake's streaming sink treats each "update" as an **append** (Delta doesn't support in-place streaming updates)
+- Result: multiple rows per window, with escalating counts (e.g., suppressed_count = 2, 5, 8, 14)
+- The final row had the correct count, but all intermediate rows also persisted in the table
+
+With `append` mode:
+- Spark accumulates silently in internal state
+- Emits **one row per window, one time, with the correct final count**
+- Trade-off: slightly higher latency (must wait for watermark to pass)
+
+### Why the watermark matters for `availableNow=True`
+
+When using `trigger(availableNow=True)` (one-shot backfill mode), Spark processes all available Bronze data, then signals end-of-stream. At that point, all remaining open windows are finalized and flushed — even if the watermark hasn't technically passed them yet. This is why `availableNow=True` produces complete results for historic data.
+
+With `trigger(processingTime="30 seconds")` (continuous mode), there is no end-of-stream signal. Windows can only close via the watermark — so you **must** have new events arriving with later timestamps to push the watermark forward and close older windows.
+
+---
+
 ## Architectural Decisions
 
 ### Why Deduplication Must Be Deterministic
