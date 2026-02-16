@@ -161,7 +161,7 @@ print("✓ silver_alerts table created")
 # window plus an LLM-generated summary.
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS gold_incidents (
+CREATE OR REPLACE TABLE gold_incidents (
     incident_id            STRING    NOT NULL  COMMENT 'Unique incident identifier',
     alert_id               STRING    NOT NULL  COMMENT 'Source alert from Silver',
     fingerprint            STRING    NOT NULL,
