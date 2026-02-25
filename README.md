@@ -411,6 +411,34 @@ Adding a new source (e.g. New Relic) requires:
 - SQL joins are exact and deterministic — same alert always correlates with the same Bronze events
 - Cost: Spark scan is DBU compute only. LLM correlation at 209 incidents would add significant token cost per run
 
+### Improving Event Correlation — Options
+
+The natural question is: *"Why constrain to 60–120 minutes? Why not send everything related to an alert and let the AI figure out what matters?"* That instinct is valid, but sending unbounded raw data to the LLM trades determinism for noise, and cost scales with every additional token. Three targeted improvements preserve determinism while solving the boundary problem:
+
+**Option 1 — Adaptive Correlation Window**
+
+Instead of a fixed 60-minute lookback, vary the window based on alert type or early signal strength:
+- A `Memory High` alert may need a longer lookback than a `Disk Full` alert
+- If no correlated events are found in the initial window, auto-expand before building context
+- Keeps the correlation step fully deterministic and SQL-driven — only the window size changes
+
+**Option 2 — Two-Stage Correlation (Staged Context Expansion)**
+
+Stage 1 (Silver — deterministic): Build primary Incident Context using the bounded window. Use rule-based heuristics to score completeness — e.g., `confidence_score < 0.6` from Gold signals that context may be insufficient.
+
+Stage 2 (conditional): If Gold returns a low-confidence result, selectively fetch additional context beyond the window — not everything, but candidate events filtered by relevance (same fingerprint, same host, anomaly-flagged metrics). Re-invoke `ai_query()` with the enriched context.
+
+This avoids blanket token explosion. The second LLM call only fires when the first one signals uncertainty, and only with a targeted expansion — not the full historical record.
+
+**Option 3 — Feature Compression Before LLM**
+
+Instead of passing raw log lines and raw metric samples, pre-aggregate in Silver before building `incident_context_text`:
+- Metrics → statistical summaries (max, avg, rate-of-change over the window) instead of raw time-series rows
+- Logs → deduplicated error codes with counts instead of full log text
+- Events → structured fields only, not free-text payloads
+
+The LLM reasons better over structured summaries than raw data floods. Fewer tokens, higher signal density, faster inference. This is the lowest-effort improvement and compatible with Options 1 and 2.
+
 ### Why LLM at Gold as a Streaming Table?
 
 `gold_incidents_demo` is a DLT streaming table — it reads from `silver_incidents_demo` using `dlt.read_stream()`. This means `ai_query()` fires **exactly once per new incident** the moment Silver emits it. The pipeline runs in **continuous mode**, so there is no polling lag between a new alert arriving and its LLM analysis landing in Gold.
