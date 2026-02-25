@@ -1,6 +1,6 @@
 # Smart Application Monitoring (AMS) — DLT Pipeline
 
-AI-powered application monitoring pipeline built on Databricks Delta Live Tables. Ingests raw alert events from multiple observability sources, normalises and deduplicates them, correlates related alerts into incidents, and produces LLM-enriched incident analysis — all in a continuous **Bronze → Silver → Gold** medallion architecture.
+AI-powered application monitoring pipeline built on Databricks Delta Live Tables. Ingests raw alert events from multiple observability sources, normalises them into a common data model, deduplicates noisy alert firings, correlates each alert with its related Logs, Metrics and Events within a bounded time window to build a structured Incident Context, and feeds that context to an LLM for root cause analysis — all in a continuous **Bronze → Silver → Gold** medallion architecture.
 
 ---
 
@@ -39,11 +39,12 @@ AI-powered application monitoring pipeline built on Databricks Delta Live Tables
 │  SILVER LAYER  (silver_demo.py)                          [Streaming] │
 │                                                                     │
 │  silver_alerts_demo                                                 │
-│  (5-min window deduplication, 486 rows)                             │
+│  (alert suppression: 5-min window deduplication, 486 rows)          │
 │          │                                                          │
 │          ▼                                                          │
 │  silver_incidents_demo                                              │
-│  (60-min lookback correlation + LLM context text, 486 rows)         │
+│  (event correlation: 60-min lookback across Alerts + Logs +         │
+│   Metrics → builds incident_context_text, 486 rows)                 │
 │  [stream-static join: new alerts × full Bronze snapshot]            │
 └─────────────────────────┬───────────────────────────────────────────┘
                           │
@@ -59,6 +60,10 @@ AI-powered application monitoring pipeline built on Databricks Delta Live Tables
 ```
 
 The pipeline runs in **continuous mode** — no polling interval, no scheduled triggers. Each new alert flows from Bronze through to a Gold LLM analysis in real time.
+
+**Configurable parameters:**
+- **Alert suppression window** — time window within which duplicate firings of the same alert are collapsed (currently 5 minutes)
+- **Event correlation window** — lookback period for gathering all related Logs, Metrics and Events per alert to build the Incident Context (currently 60 minutes; tunable to 120 minutes or beyond based on incident patterns)
 
 ---
 
@@ -212,6 +217,8 @@ error_message    : memory_high threshold breached on payments-api: 116.1 > 85.0
 
 ### Step 4 — Correlation → `silver_incidents_demo`
 
+**Correlation** means: for each deduplicated alert, find all Logs, Metrics, and Events associated with the same application within a bounded lookback window, and assemble them into a structured Incident Context text. This step is entirely deterministic — same alert, same Bronze data, same context every time. The context is what gets handed to the LLM; the LLM's job is causation, not data gathering.
+
 A single alert in isolation gives limited context. This step enriches each deduplicated alert by **looking back 60 minutes** across `bronze_events_demo` and joining on every event associated with the same `application_id` — regardless of event type.
 
 #### What "all event types" means
@@ -239,7 +246,9 @@ lookback_join = (
 )
 ```
 
-Right now, only `prior_alert_count` is extracted (filtered to `event_type == "alert"`). The full joined dataset — including logs and metrics — is the foundation for the next iteration of the pipeline, where `incident_context_text` will include recent error log snippets and metric trajectories alongside the alert count.
+**Current implementation**: extracts `prior_alert_count` (filtered to `event_type == "alert"`). This gives the LLM a signal for sustained distress — 11 prior alerts in 60 minutes vs 0 tells a very different story.
+
+**Next iteration**: the full joined dataset — error log snippets (`event_type == "log"`) and metric trajectories (`event_type == "metric"`) — feeds directly into `incident_context_text`, giving the LLM the complete picture for each incident: what the service was doing, what it logged, and how its metrics were trending, all within the correlation window.
 
 #### How `incident_context_text` is built
 
@@ -299,7 +308,7 @@ error_message         : memory_high threshold breached on payments-api: 116.1 > 
 _created_at           : 2026-02-20T06:21:34
 ```
 
-The `incident_context_text` is the **handoff boundary** between deterministic processing (Bronze + Silver) and the LLM call (Gold). Everything before this line is SQL-deterministic. Everything after uses it as input.
+The `incident_context_text` is the **handoff boundary** between deterministic data engineering (Bronze + Silver) and the LLM (Gold). Bronze and Silver are fully deterministic — same inputs always produce the same context. Gold is where the LLM performs true correlation and causation reasoning on top of that prepared context.
 
 ---
 
@@ -375,15 +384,19 @@ _analyzed_at       : 2026-02-20T06:21:51
 
 ### Why 3-Tier Bronze (Raw → Normalised → Unified)?
 
+Every source — DataDog, Azure Monitor, New Relic, Splunk — has its own field names, nesting conventions, and severity codes. The Silver correlation step needs to join `alert.application_id` against `bronze.application_id` across all of them. That join only works if every source speaks the same schema. The 3-tier Bronze pattern enforces this:
+
+- **Raw tables** preserve the original payload exactly as received — full audit trail, reprocessing from source is always possible
+- **Normalised tables** map each source to the common data model (shared field names, unified severity codes, flattened structs)
+- **Unified table** (`bronze_events_demo`) unions all normalised sources — Silver and Gold see one table, one schema, regardless of how many sources are onboarded
+
+A common **fingerprint hash** (`SHA-256` of `alert_type + application_id + host_id`) is generated at normalisation time. This fingerprint is the deduplication key in Silver and the correlation grouping key — the same alert re-firing from DataDog and Azure Monitor for the same service on the same host gets the same fingerprint, allowing deterministic suppression and grouping.
+
 Adding a new source (e.g. New Relic) requires:
 1. One `bronze_raw_newrelic` table — 10 lines
 2. One `bronze_normalized_newrelic` table — schema mapping, ~50 lines
 3. One union line in `bronze_events_demo`
 4. **Zero changes** to Silver or Gold
-
-Without this pattern every new source would require changes across all three layers. Estimated saving: 2 days vs 2 weeks per new source.
-
-The raw tables also preserve the original audit trail — if normalization logic changes, you can reprocess from raw without touching production monitoring systems.
 
 ### Why Deterministic Fingerprint Deduplication (Not LLM)?
 
@@ -402,14 +415,28 @@ The raw tables also preserve the original audit trail — if normalization logic
 
 `gold_incidents_demo` is a DLT streaming table — it reads from `silver_incidents_demo` using `dlt.read_stream()`. This means `ai_query()` fires **exactly once per new incident** the moment Silver emits it. The pipeline runs in **continuous mode**, so there is no polling lag between a new alert arriving and its LLM analysis landing in Gold.
 
-This works because by the time a row reaches Gold's stream, all the expensive deterministic work is already done:
+This works because by the time a row reaches Gold's stream, all the deterministic data engineering work is already done:
 1. **Silver dedup** has collapsed repeated alert firings into one record — `ai_query()` is never called on a duplicate
-2. **Silver correlation** has run the 60-min lookback and assembled `incident_context_text` — the LLM receives full context, not a fragment
+2. **Silver correlation** has assembled `incident_context_text` with the full 60-min lookback — the LLM receives a complete, bounded context, not a fragment
 3. Gold's `ai_query()` call has everything it needs in a single row — one call, one complete answer
 
-Calling the LLM earlier in the pipeline would mean calling it on raw, incomplete data — before deduplication has run, before the 60-minute correlation window has closed. That would produce more calls (one per raw event instead of one per deduplicated incident) and worse answers (no `prior_alert_count`, no full context). Gold streaming gives you the best of both worlds: real-time analysis the moment context is complete.
-
 An added practical benefit: if the LLM endpoint is slow or temporarily unavailable, only Gold gets NULL rows. Bronze and Silver keep running without interruption. Failed rows are retried on the next continuous processing cycle (`failOnError => false`).
+
+### Why Not Shift the LLM Left (to Silver or Bronze)?
+
+Moving the LLM call earlier in the pipeline — closer to raw data — is a tempting optimisation but has two compounding costs:
+
+1. **Token explosion**: At Bronze, there are 652 raw events. At Silver after deduplication there are 486 alerts. At Gold after correlation, each row carries a complete `incident_context_text` with bounded context. Calling the LLM at Bronze means 652 calls with minimal context per call; at Gold it's 486 calls each with rich, actionable context. Shifting left increases call volume while simultaneously degrading answer quality.
+
+2. **Deterministic scaffolding is still required**: Even if the LLM were called at Silver, the correlation step — gathering Logs, Metrics, and Events within the bounded window — still needs to run as deterministic data engineering first. There is no shortcut: the LLM cannot replace the join. It can only reason on top of what the join has already assembled. Shifting the LLM call left does not eliminate the Silver correlation step; it just adds an expensive, lower-quality LLM call before it.
+
+The correct boundary is: deterministic data engineering builds the context, the LLM reasons on the context.
+
+### Root Cause Analysis — Two Pathways
+
+The current Gold layer uses **General Intelligence**: the LLM applies broad SRE knowledge to reason about the incident context with no domain-specific training. This is the right starting point — it requires no knowledge base maintenance and handles novel failure modes well.
+
+The planned next phase adds **Enterprise Knowledge**: an RAG layer that retrieves relevant runbooks, past incident resolutions, and service-specific documentation before the `ai_query()` call, grounding the LLM's reasoning in organisation-specific context. This is an additive extension — the deterministic Bronze → Silver pipeline and the streaming Gold table remain unchanged; only the prompt assembled from `incident_context_text` is enriched with retrieved enterprise knowledge.
 
 ### Why Structured JSON Output (Not Free Text)?
 
